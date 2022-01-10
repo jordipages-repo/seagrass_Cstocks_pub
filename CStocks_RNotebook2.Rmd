@@ -1,0 +1,1593 @@
+---
+title: "Global seagrass carbon stock review"
+author: "Jordi F. Pagès"
+date: "`r format(Sys.time(), '%d-%m-%Y')`"
+output:
+  html_notebook:
+    toc: yes
+  pdf_document:
+    toc: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+
+# 1. Meta-analysis of the effect of `depth` on different response variables
+We are interested in knowing if organic carbon, sediment bulk density and carbon density change along core depth for the sample of cores we have collated from the literature. To do so, we will use a meta-analytic framework, taking advantage of those cores for which we have information for several levels along core length. This will allow us to estimate the slope of a regression between the response variable of interest (i.e. organic carbon, bulk density or carbon density) against the predictor `depth`. The beauty of this approach is that the slopes from simple linear regressions can directly be used as effect sizes in a meta-analysis. 
+
+## 1.1. Calculating slopes of linear regressions for all cores and 3 response variables
+We will first load the data set with `CoreId` information, which would be like the study variable in a meta-analysis, meaning that there might be more than one core in a single publication (i.e. study ≠ publication). We use a `left_join()` to get also for each core the publication where it comes from, to potentially use it as a random effect in a random effects meta-analysis. We then filter out all cores with less than 3 points along their length, because linear regressions with less than 3 points are not very reliable.
+
+```{r, include=FALSE}
+
+# # # # # # # # #
+# LIBRARIES ----
+# # # # # # # # #
+
+library(tidyverse)
+library(stringr)
+library(forcats)
+library(RColorBrewer)
+library(metafor)
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+# Loading the main data set and checking for errors ----
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+forqurean <- read_csv(file = "Data_forqurean.csv")
+glimpse(forqurean)
+
+source("01_DataImport&Corrections_CarbonReview.R")
+rm(list = c("cstocks_tidy", "cstocks_tidy20Stocks"))
+
+# We will only keep cores with more than 3 depths
+forqurean_enough <- forqurean %>% 
+  left_join(cstocks, key = "CoreID") %>% # This left_join is to add info about the study source from where we took core info
+  group_by(CoreID) %>% 
+  summarise(n = n(),
+            Species = first(Species),
+            Source = first(Source)) %>% 
+  filter(n>3)
+
+# And join with original data set to recover all columns (because by summarising we lost some columns), and we also join 
+# with cstocks to get info about the study source
+forqureanOK <- forqurean_enough %>% 
+  left_join(forqurean, key = "CoreID") %>% 
+  mutate(Carbon_density = 0.01*Organic_carbon*Dry_bulk_density)
+
+```
+
+Once we have the data set of cores with ≥3 points along depth then we use the package `purrr` and function `map()` to run the hundreds of regressions between organic carbon, bulk density and carbon density with `depth` in a fast way. We then use `broom` package to tidy the results from these regressions. 
+
+```{r, message=FALSE}
+# We'll first nest data to then use purrr
+by_coreID <- forqureanOK %>% 
+  group_by(CoreID) %>% 
+  nest()
+
+# Model fitting function (just a linear model) for organic carbon
+core_model_organic_carbon <- function(df){
+  lm(Organic_carbon ~ Depth_centre_slice, data = df)
+}
+
+# Model fitting function (just a linear model) for dry bulk density
+core_model_bulkd <- function(df){
+  lm(Dry_bulk_density ~ Depth_centre_slice, data = df)
+}
+
+# Model fitting function (just a linear model) for carbon density
+core_model_carbon_density <- function(df){
+  lm(Carbon_density ~ Depth_centre_slice, data = df)
+}
+
+# We now apply the function (linear model) to each data frame in each row of the nested data frame
+by_coreID <- by_coreID %>% 
+  mutate(model_organic_carbon = map(data, core_model_organic_carbon),
+         model_bulkd = map(data, core_model_bulkd),
+         model_carbon_density = map(data, core_model_carbon_density))
+```
+
+```{r, include=FALSE}
+# Now we want the coefficients. We use broom:tidy
+by_coreID <- by_coreID %>% 
+  mutate(coefs_organic_carbon = map(model_organic_carbon, broom::tidy),
+         coefs_bulkd = map(model_bulkd, broom::tidy),
+         coefs_carbon_density = map(model_carbon_density, broom::tidy)) %>% 
+  unnest(c(coefs_organic_carbon, coefs_bulkd, coefs_carbon_density), .drop = T) %>% 
+  rename(term_organic_carbon = term,
+         estimate_organic_carbon = estimate,
+         std.error_organic_carbon = std.error,
+         statistic_organic_carbon = statistic,
+         p.value_organic_carbon = p.value,
+         term_bulkd = term1,
+         estimate_bulkd = estimate1,
+         std.error_bulkd = std.error1,
+         statistic_bulkd = statistic1,
+         p.value_bulkd = p.value1,
+         term_carbon_density = term2,
+         estimate_carbon_density = estimate2,
+         std.error_carbon_density = std.error2,
+         statistic_carbon_density = statistic2,
+         p.value_carbon_density = p.value2)
+
+# We only want the Depth_centre_slice coeffs
+all_coefs <- by_coreID %>% 
+  select(-data, -model_organic_carbon, -model_bulkd, -model_carbon_density) %>% 
+  filter(term_organic_carbon == "Depth_centre_slice" & term_bulkd == "Depth_centre_slice" & term_carbon_density == "Depth_centre_slice") %>% 
+  print(n = Inf)
+```
+
+Apart from the slopes from the simple linear regressions, to run a meta-analysis we will also need the variance of the linear regression estimates. To get these, we will use the standard error from the regression, and use sample size to calculate the variance as follows:
+
+```{r, message=FALSE}
+all_coefs <- all_coefs %>% 
+  left_join(forqurean_enough, key = "CoreID") %>% 
+  mutate(variance_organic_carbon = (std.error_organic_carbon^2)*n,
+         variance_bulkd = (std.error_bulkd^2)*n,
+         variance_carbon_density = (std.error_carbon_density^2)*n,
+         Species = factor(Species),
+         Source = ifelse(is.na(Source), "not found", Source))
+```
+
+## 1.2. Meta-analysis for *organic carbon*
+### 1.2.1. Fixed effects meta-analysis
+We start with the simplest option, which is the fixed-effects meta-analysis, which assumes no variation between study effects.
+ 
+```{r}
+ organic_carbon_meta <- rma(yi = estimate_organic_carbon, 
+                           vi = variance_organic_carbon, 
+                           method = "FE", 
+                           data = all_coefs)
+summary(organic_carbon_meta)
+```
+The fixed-effects meta-analysis summary results show that there isn't a strong need for adding sources of heterogeneity. However, we have good reasons to try and see if a random effects model improves our results, particularly with `Source` as a random effect. According to this model, depth would not influence organic carbon. 
+
+### 1.2.2. Random effects meta-analysis
+Adding a random effect (`Source`), to account for the variability shared by those studies that come from the same publication.
+
+```{r}
+organic_carbon_meta5 <- rma.mv(yi = estimate_organic_carbon,
+                               V = variance_organic_carbon,
+                               random = ~ 1|Source,
+                               method = "REML",
+                               data = all_coefs)
+summary(organic_carbon_meta5)
+```
+The results from this meta-analysis show that there appears to be a an effect of core `depth` on organic carbon, just on the limit of significance (*P*-value = 0.0472). Specifically, organic carbon appears to decrease with depth. We have also checked the need for the inclusion of the variable `Species` as a moderator of these effects, but this moderator is not needed (as suggested by the high *P*-value of test for moderators). Thus, our best model is the Random Effects Meta-analysis model, with `Source` as a random effect.
+
+Let's now examine funnel plot to assess publication bias. 
+```{r}
+funnel(organic_carbon_meta5)
+```
+In funnel plots, larger, more precise studies (i.e. with a small standard error) appear towards the top of the graph. Where there is pronounced asymmetry, e.g. all small studies report strongly negative effects, this indicates publication bias, perhaps because smaller studies without statistically significant effects were not published. In this analysis, there aren't indications of concerning biases.
+
+## 1.3. Meta-analysis for *bulk density*
+### 1.3.1. Fixed effects meta-analysis
+We start with the simplest option, which is the fixed-effects meta-analysis, which assumes no variation between study effects.
+
+```{r}
+bulkd_meta <- rma(yi = estimate_bulkd, 
+                  vi = variance_bulkd,
+                  method = "FE",
+                  data = all_coefs)
+summary(bulkd_meta)
+```
+The fixed-effects meta-analysis summary results show that there isn't a strong need for adding sources of heterogeneity. However, we have good reasons to try and see if a random effects model improves our results, particularly with `Source` as a random effect. The model results show that bulk density increases significantly with core depth. 
+
+### 1.3.2. Random effects meta-analysis
+Adding a random effect (`Source`), to account for the variability shared by those studies that come from the same publication.
+
+```{r}
+bulkd_meta5 <- rma.mv(yi = estimate_bulkd,
+                      V = variance_bulkd,
+                      random = ~ 1|Source,
+                      method = "REML",
+                      data = all_coefs)
+summary(bulkd_meta5)
+```
+According to model results, bulk density clearly increases with core depth. We checked the need for including moderators, and `Species` could be included. This inclusion doesn´t change the overall direction and signficance of the effect except for *Halodule emarginata*. Therefore, and for clarity when presenting this data in figure format, we're not including this moderator.
+
+Let's now examine the funnel plot to assess publication bias. 
+```{r}
+funnel(bulkd_meta5)
+```
+In this analysis, there were indications that the smaller studies (those with a larger standard error) had a bias towards reporting negative effect of core depth on bulk density.
+
+## 1.4. Meta-analysis for *carbon density*
+### 1.4.1. Fixed effects meta-analysis
+We start with the simplest option, which is the fixed-effects meta-analysis, which assumes no variation between study effects.
+
+```{r}
+carbon_density_meta <- rma(yi = estimate_carbon_density, 
+                           vi = variance_carbon_density, 
+                           method = "FE",
+                           data = all_coefs)
+summary(carbon_density_meta)
+```
+The fixed-effects meta-analysis summary results show that there isn't a strong need for adding sources of heterogeneity. However, we have good reasons to try and see if a random effects model improves our results, particularly with `Source` as a random effect. The model results show that carbon density does not change with core depth. 
+
+### 1.4.2. Random effects meta-analysis
+Adding a random effect (`Source`), to account for the variability shared by those studies that come from the same publication.
+
+```{r}
+carbon_density_meta5 <- rma.mv(yi = estimate_carbon_density,
+                               V = variance_carbon_density,
+                               random = ~ 1|Source,
+                               method = "REML",
+                               data = all_coefs)
+summary(carbon_density_meta5)
+```
+According to model results, carbon density is unaffected by core depth. We checked the need for including moderators, and `Species` doesn't need to be included.
+
+Let's now examine the funnel plot to assess publication bias. 
+```{r}
+funnel(carbon_density_meta5)
+```
+In this analysis, there aren't indications of concerning biases.
+
+## 1.5. Overall forest plot
+```{r, include = FALSE}
+data_organic_carbon <- tibble("Organic carbon", 
+                              organic_carbon_meta5$beta, 
+                              organic_carbon_meta5$ci.lb, 
+                              organic_carbon_meta5$ci.ub, 
+                              "*")
+names(data_organic_carbon) <- c("variable", 
+                                "estimate", 
+                                "lower", 
+                                "upper", 
+                                "label")
+data_bulk <- tibble("Dry bulk density", 
+                    bulkd_meta5$beta,
+                    bulkd_meta5$ci.lb,
+                    bulkd_meta5$ci.ub,
+                    "***")
+names(data_bulk) <- c("variable", 
+                      "estimate",
+                      "lower", 
+                      "upper", 
+                      "label")
+data_carbon_density <- tibble("Carbon density",
+                              carbon_density_meta5$beta,
+                              carbon_density_meta5$ci.lb, 
+                              carbon_density_meta5$ci.ub,
+                              " ")
+names(data_carbon_density) <- c("variable", 
+                                "estimate", 
+                                "lower", 
+                                "upper", 
+                                "label")
+data_meta <- rbind(data_organic_carbon, data_bulk, data_carbon_density)
+```
+
+```{r, echo = FALSE}
+ggplot(data_meta, aes(x = variable, y = estimate, ymax = upper, ymin = lower)) +
+  geom_point(aes(size = 1.2)) +
+  geom_errorbar(aes(width = 0.1)) +
+  geom_text(aes(label = label), size = 8, position = position_nudge(x = 0.1)) +
+  coord_flip() +
+  geom_hline(aes(yintercept = 0), lty = 2, size = 1) + 
+  xlab("") +
+  ylab("Change along core depth") +
+  theme_bw(base_size = 17,
+           base_line_size = 0.5) + 
+  theme(legend.position = "none")
+```
+
+
+# 2. Linear mixed effects models
+We are interested in assessing the influence of different predictors on the response variable **20-cm-carbon-stocks** (`cstocks` from now on). This response variable has been obtained by taking the raw carbon stock data for 0-20 cm depth, and for those cores with data for the 20-50 cm section (which is a 30 cm section), we have estimated the 20-cm-`cstocks` at this depth using the following formula: `(Stock_20_50cm/30)*20)`.
+
+On a first approach we will be analysing the influence of several predictors on the `cstocks` of monospecific meadows. The fixed effects whose influence on the response variable `cstocks` we want to test are:  
+
+  * `Species`: The scientific name of the seagrass species from which the core was extracted. Categorical factor (e.g. *Posidonia oceanica*...).  
+  
+  * `FIN_TYP_names`: The geomorphological setting of the seagrass meadow from where the core was extracted. Categorical factor with 7 levels (e.g. Lagoons, tidal systems, small deltas...).  
+  
+  * `Lat_Zone`: The latitudinal zone, i.e. temperate, tropical or polar, from where the core was extracted.  Categorical factor with 3 levels.  
+  
+Once we have these predictors analysed for monospecific meadows, we will also assess if the categorical factor `Meadow_type` (i.e. whether the meadow is mono or multispecific) has any influence on `cstocks`.
+  
+## 2.1. Linear mixed effects models with the data set `cstocks_data` (all cores)
+We first remove from the data set any `Species` that contains less than 10 samples.
+
+```{r, include = FALSE}
+rm(list = ls())
+
+library(nlme)
+library(car)
+library(modelr)
+library(multcomp)
+library(ggsci)
+
+source("01_DataImport&Corrections_CarbonReview.R")
+source("mcheck_function.R")
+rm(list = c("cstocks_tidy", "cstocks")) # Because we want to use, only, the 20 cm stocks data, not carbon densities.
+
+cstocks_data <- cstocks_tidy20Stocks %>% 
+  filter(Meadow_type == "monospecific") %>%
+  mutate(Lat_Zone_Posi = ifelse(Posi == "Posi", "Posi", Lat_Zone),
+         Lat_Zone = factor(Lat_Zone),
+         # CoreID_unique = factor(CoreID_unique),
+         FIN_TYP_names = factor(recode(FIN_TYP,
+                                       `0` = "Endorheic or Glaciated",
+                                       `1` = "Small deltas",
+                                       `2` = "Tidal systems",
+                                       `3` = "Lagoons",
+                                       `4` = "Fjords and fjaerds",
+                                       `5` = "Large rivers",
+                                       `6` = "Karst",
+                                       `7` = "Arheic"))) %>% 
+  # filter(Species != "Posidonia oceanica") %>% # To check the effect of Species without Posidonia oceanica
+  # select(Latitude, Species, Source, depth, cstocks, CoreID_unique) %>% 
+  select(CoreID_unique, Latitude, Species, FIN_TYP_names, Nearest_distance, Lat_Zone, Lat_Zone_Posi, Source, depth, cstocks) %>% 
+  filter_all(all_vars(!is.na(.)))  
+# filter(Species != "Posidonia oceanica" | cstocks != 1.9)
+
+# Otherwise the model might try to calculate coefficients for levels that no longer exist.
+cstocks_data$FIN_TYP_names <- droplevels(cstocks_data$FIN_TYP_names)
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+# 2. Modelling the response 20cm-carbon stocks. ALL CORES ----
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+
+
+# Removing species with less than 10 samples
+SpeciesMoreThan10Samples <- cstocks_data %>% 
+  group_by(Species) %>% 
+  summarise(n = n()) %>% 
+  filter(n>=10) %>% 
+  select(Species)
+SpeciesMoreThan10Samples <- as.data.frame(SpeciesMoreThan10Samples)
+SpeciesMoreThan10Samples <- SpeciesMoreThan10Samples$Species
+# SpeciesMoreThan10Samples <- SpeciesMoreThan10Samples[-10]
+cstocks_data <- cstocks_data %>% 
+  filter(Species %in% SpeciesMoreThan10Samples)
+
+# Otherwise the model might try to calculate coefficients for levels that no longer exist.
+cstocks_data$Species <- droplevels(cstocks_data$Species) 
+```
+From data exploration, we have reasons to believe there will be variance heterogeneity at least at the `Species` level, and also there are a number of potential random effects. 
+
+### 2.1.1. Selecting the variance structure
+
+Let's start building different models with different variance structures to deal with heterogeneity. We will select those with lower AIC. 
+
+```{r}
+m0.gls <- gls(log(cstocks) ~ Species + FIN_TYP_names + Lat_Zone, data = cstocks_data)
+m0.gls.w <- gls(log(cstocks) ~ Species + FIN_TYP_names + Lat_Zone, 
+                weights = varIdent(form = ~1|Species), 
+                data = cstocks_data)
+m0.gls.w2 <- gls(log(cstocks) ~ Species + FIN_TYP_names + Lat_Zone, 
+                 weights = varIdent(form = ~1|FIN_TYP_names), 
+                 data = cstocks_data)
+m0.gls.w3 <- gls(log(cstocks) ~ Species + FIN_TYP_names + Lat_Zone, 
+                 weights = varIdent(form = ~1|Species*FIN_TYP_names), 
+                 data = cstocks_data)
+m0.gls.w5 <- gls(log(cstocks) ~ Species + FIN_TYP_names + Lat_Zone, 
+                 weights = varIdent(form = ~1|Species*Lat_Zone), 
+                 data = cstocks_data)
+AIC(m0.gls, m0.gls.w, m0.gls.w2, m0.gls.w3, m0.gls.w5)
+```
+According to AIC the best model will be either the one with a specific variance structure for `Species` levels, or the one with both `Species` and `FIN_TYP_names` specified. Let's check which of these models is best with a logLikelihood ratio test.
+
+```{r}
+anova(m0.gls.w, m0.gls.w3)
+```
+And the LRtest suggests as the best model the complex one (`m0.gls.w3`), the one with both `Species` and `FIN_TYP_names` as weights.
+
+### 2.1.2. Selecting the random structure
+Let's now check which random structure we should include in the model. 
+
+We'll first build different models with different random structures (from simple random intercept models, to models with one or two nested random effects), and compare them with AIC.
+
+```{r, warning=FALSE, message=FALSE}
+m0.w.lme <- lme(log(cstocks) ~ Species + FIN_TYP_names + Lat_Zone, 
+                random = ~1|Source,
+                weights = varIdent(form = ~1|Species*FIN_TYP_names), 
+                control = lmeControl(maxIter = 1000, msMaxIter = 1000),
+                data = cstocks_data)
+# anova(m0.w.lme, m0.gls.w3) # Source is needed as random intercept
+
+m0.w.lme1 <- lme(log(cstocks) ~ Species + FIN_TYP_names + Lat_Zone, 
+                 random = ~1|CoreID_unique,
+                 weights = varIdent(form = ~1|Species*FIN_TYP_names), 
+                 control = lmeControl(maxIter = 1000, msMaxIter = 1000),
+                 data = cstocks_data)
+# anova(m0.w.lme1, m0.gls.w3) # CoreID_unique is needed as random intercept
+
+m0.w.lme2 <- lme(log(cstocks) ~ Species + FIN_TYP_names + Lat_Zone, 
+                 random = ~1|Source/CoreID_unique,
+                 weights = varIdent(form = ~1|Species*FIN_TYP_names), 
+                 control = lmeControl(maxIter = 1000, msMaxIter = 1000),
+                 data = cstocks_data)
+# anova(m0.w.lme, m0.w.lme2) # Nested model is better than any single random effect.
+
+
+AIC(m0.w.lme, m0.w.lme1, m0.w.lme2)
+```
+
+```{r}
+anova(m0.w.lme1, m0.w.lme2)
+```
+According to AIC and LRtest, the best model in regards to the random structure is `m0.w.lme2`.
+
+### 2.1.3. Selecting the fixed effects (predictors)
+We can now start selection of the fixed effects of the model - the selection of the predictors that influence `cstocks`. We do so by dropping the different predictors one by one from the full model, which is `m0.w.lme2`. We update it to use the maximum likelihood method, otherwise we can’t compare models with differences in the fixed part. We start by dropping the `Lat_Zone`, and checking if this improves the model fit.
+
+```{r, message=FALSE, warning=FALSE}
+# Model selection 
+m1.w.lme.full <- update(m0.w.lme2, method = "ML")
+m1.w.lme.sub <- update(m1.w.lme.full, .~. -Lat_Zone)
+anova(m1.w.lme.full, m1.w.lme.sub)
+```
+The non-significant logLikelihood ratio test point to `m1.w.lme.sub` as the best model. Thus, we *can* drop `Lat_Zone`. Let’s see if we can drop `FIN_TYP_names` now.
+
+```{r, message=FALSE, warning=FALSE}
+m2.w.lme.full <- m1.w.lme.sub
+m2.w.lme.sub <- update(m2.w.lme.full, ~. -FIN_TYP_names)
+anova(m2.w.lme.full, m2.w.lme.sub)
+```
+Both AIC and LRtest tell us that the most complex model is the best. We cannot drop any more predictors. Thus, the final model for the `cstocks_data` (all cores) data set is the following:
+
+```{r, message=FALSE, warning=FALSE}
+mfinal <- lme(log(cstocks) ~ Species + FIN_TYP_names, 
+              random = ~1|Source/CoreID_unique,
+              weights = varIdent(form = ~1|Species*FIN_TYP_names),
+              method = "REML",
+              control = lmeControl(maxIter = 1000, msMaxIter = 1000),
+              data = cstocks_data)
+Anova(mfinal)
+```
+The best model is the one including `Species` and `FIN_TYP_names`. According to the `car::Anova(mfinal)` table, both the effects of species ID and geomorphology strongly influence `cstocks`.
+
+### 2.1.4. Model validation
+Let’s now check model assumptions and validate the model with some diagnostic plots.
+
+First, let’s check if we solved the problem of variance heterogeneity that we observed for the different `Species` levels. The figure on the right (with pearson residuals) shows how we managed to solve the problem of residual heterogeneity by including `Species` as weights in the linear mixed effects model.
+
+```{r, echo = FALSE}
+# Checking if we solved heterogeneity
+par(mfrow = c(1, 2))
+boxplot(resid(mfinal) ~ Species, cstocks_data)
+boxplot(resid(mfinal, type = "pearson") ~ Species, cstocks_data) # FANTASTIC! Check difference between both type of residuals.
+```
+
+Let’s now check if we solved the problem of variance heterogeneity for the different `FIN_TYP_names` levels. Again, the figure on the right (with pearson residuals) shows how we managed to solve the problem of residual heterogeneity by including `FIN_TYP_names` as weights in the linear mixed effects model.
+
+```{r, echo = FALSE}
+# Checking if we solved heterogeneity
+par(mfrow = c(1, 2))
+boxplot(resid(mfinal) ~ FIN_TYP_names, cstocks_data)
+boxplot(resid(mfinal, type = "pearson") ~ FIN_TYP_names, cstocks_data) # FANTASTIC! Check difference between both type of residuals.
+```
+Let’s now check some plots to assess model diagnostics. The plot on the left shows residuals against fitted values and the one on the right is a qqplot. Note that the qqplot denotes the existence of some overdispersion. This is not so obvious in the qqplot of the same model but without the nested random effect (so with `random = ~1|Source`, instead of `random = ~1|Source/CoreID_unique`). While it’s true that overdispersion appears to be higher for the model with nested random effects (upper panels), the one with `Source` as a random intercept has bigger absolute residuals (lower panels).
+
+```{r, echo = FALSE}
+# Validation
+mcheck(mfinal) # Residuals not GOOD! OBVIOUS OVERDISPERSION! But this can happen with random effects.
+mcheck(m0.w.lme)
+```
+
+Moreover, the fitted values vs. response which is a useful plot for model diagnostics, shows how much better the model with `CoreID_unique` nested in `Source` is than the model with just `Source` as random intercept.
+
+```{r, echo = FALSE}
+# See https://stats.stackexchange.com/questions/351352/adding-an-observation-level-random-term-messes-up-residuals-vs-fitted-plot-why
+
+# Fitted versus response (MUCH BETTER WITH this nested model than with the random intercept!!!)
+par(mfrow = c(1,2))
+plot(fitted(mfinal) ~ log(cstocks_data$cstocks), col="darkgrey", 
+     xlab="Y (response)", ylab="Fitted Values", main = "Model with nested \n random effects")
+abline(a=0, b=1, col="red")
+plot(fitted(m0.w.lme) ~ log(cstocks_data$cstocks), col="darkgrey", 
+     xlab="Y (response)", ylab="Fitted Values", main = "Model with Source as \n random intercept")
+abline(a=0, b=1, col="red")
+```
+
+### 2.1.5. Multiple comparisons (Tukey post-hoc tests)
+Now that the best-selected model is validated, let’s run the Tukey multiple comparison tests for the different predictors.
+
+For `Species` main effect, the only significant differences are the following:
+
+```{r, include = FALSE}
+multcompar_species <- glht(mfinal, linfct=mcp(Species="Tukey"))
+summary_multcompar_species <- broom::tidy(summary(multcompar_species))
+letters_multcompar_species <- broom::tidy(cld(multcompar_species, level = 0.06))
+```
+
+```{r,echo=FALSE, warning=FALSE}
+# Significant multiple comparisons
+summary_multcompar_species %>%
+  filter(adj.p.value<0.06) %>%
+  select(contrast, estimate, std.error, adj.p.value) %>%
+  print(n = Inf)
+```
+
+And for the predictor `FIN_TYP_names` the levels that differ significantly according to Tukey HSD are:
+
+```{r, echo=FALSE, warning=FALSE}
+# Multiple comparisons with library(multcompar) FOR FIN_TYP_NAMES
+multcompar_FIN_TYP_names <- glht(mfinal, linfct=mcp(FIN_TYP_names="Tukey"))
+summary_multcompar_FIN_TYP_names <- broom::tidy(summary(multcompar_FIN_TYP_names))
+letters_multcompar_FIN_TYP_names <- broom::tidy(cld(multcompar_FIN_TYP_names))
+# Significant multiple comparisons
+summary_multcompar_FIN_TYP_names %>%
+  filter(adj.p.value<0.05) %>%
+  select(contrast, estimate, std.error, adj.p.value) %>%
+  print(n = Inf)
+```
+
+### 2.1.6. Plotting main effects
+We start by taking a look at the influence of `Species` on `cstocks`. This is the most significant effect, according to the final best selected model. Note that *P.oceanica* again is the seagrass with highest `cstocks` but that in general we find less differences among species with this data set.
+
+Let's print the data in table format before checking the plot:
+```{r, echo = FALSE, message=FALSE}
+# # # # # # # # # # # # # # # # # # # #
+# 2.1 BOXPLOTS - C stocks by SPECIES ----
+# # # # # # # # # # # # # # # # # # # #
+
+cstocks_data_box <- cstocks_data %>% 
+  group_by(Species) %>% 
+  summarise(n = n(),
+            mean_stock = mean(cstocks, na.rm = T),
+            median_stock = median(cstocks, na.rm = T),
+            std.error = std.error(cstocks, na.rm = T), 
+            max_stock = max(cstocks, na.rm = T)) %>% 
+  left_join(letters_multcompar_species, by = "Species") %>% 
+  print(n = Inf)
+```
+
+```{r,echo=FALSE, warning=FALSE, message=FALSE}
+cstocks_data %>%
+  # cstocks_tidy %>%
+  filter(!is.na(Species)) %>% 
+  filter(!is.na(cstocks)) %>% 
+  left_join(letters_multcompar_species, by = "Species") %>% 
+  ggplot(aes(x = reorder(Species, cstocks, FUN = median), y = cstocks)) +
+  geom_boxplot(aes(fill = Species, colour = Species)) +
+  scale_colour_d3("category20") +
+  scale_fill_d3("category20") +
+  stat_summary(fun = median, geom = "point", shape = 15, size = 2) +
+  stat_summary(fun.data = n_fun, geom = "text", position = position_nudge(y = 20), size = 3) +
+  geom_text(data = cstocks_data_box, aes(x = Species, y = max_stock + 40, label = letters)) +
+  xlab("") +
+  ylab(bquote('Carbon stock (Mg C' ~ha^-1* ')')) +
+  coord_flip() +
+  # facet_wrap(~depth) +
+  theme_bw() +
+  theme(legend.position = "none",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        text = element_text(size = 14),
+        axis.text.y = element_text(face = "italic"))
+# ggsave(file = "Figs/Final_Figures_March2021/All_cores/cstocks_by_Species.pdf")
+
+```
+
+We now look at the influence of geomorphology (the other significant predictor of the model) on `cstocks`. We see that cores taken from lagoons and tidal systems in general have higher `cstocks`, specially compared to endorheic/glaciated environments and fjords and fjaerds.
+
+Let's print the data in table format before checking the plot:
+```{r, echo = FALSE, message=FALSE}
+# # # # # # # # # # # # # # # # # # # #
+# 2.2 BOXPlotting FIN_TYP_names ----
+# # # # # # # # # # # # # # # # # # # #
+
+cstocks_data_box <- cstocks_data %>% 
+  group_by(FIN_TYP_names) %>% 
+  summarise(n = n(),
+            mean_stock = mean(cstocks, na.rm = T),
+            median_stock = median(cstocks, na.rm = T),
+            std.error = std.error(cstocks, na.rm = T), 
+            max_stock = max(cstocks, na.rm = T)) %>% 
+  left_join(letters_multcompar_FIN_TYP_names, by = "FIN_TYP_names") %>% 
+  print(n = Inf)
+```
+
+```{r,echo=FALSE, warning=FALSE, message=FALSE}
+cstocks_data %>%
+  # cstocks_tidy %>%
+  filter(!is.na(FIN_TYP_names)) %>% 
+  filter(!is.na(cstocks)) %>% 
+  # filter(Nearest_distance < mean(Nearest_distance)) %>%
+  left_join(letters_multcompar_FIN_TYP_names, by = "FIN_TYP_names") %>% 
+  ggplot(aes(x = reorder(FIN_TYP_names, cstocks, FUN = median), y = cstocks)) +
+  geom_boxplot(aes(fill = FIN_TYP_names, colour = FIN_TYP_names)) +
+  scale_colour_d3() +
+  scale_fill_d3() +
+  stat_summary(fun = median, geom = "point", shape = 15, size = 2) +
+  stat_summary(fun.data = n_fun, geom = "text", position = position_nudge(y = 20)) +
+  # stat_summary(fun.data = a_fun, geom = "text", position = position_nudge(y = 2)) +
+  geom_text(data = cstocks_data_box, aes(x = FIN_TYP_names, y = max_stock + 40, label = letters)) +
+  xlab("") +
+  ylab(bquote('Carbon stock (Mg C' ~ha^-1* ')')) +
+  coord_flip() +
+  theme_bw() +
+  theme(legend.position = "none",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        text = element_text(size = 14))
+# ggsave(file = "Figs/Final_Figures_March2021/All_cores/cstocks_vs_FINtype.pdf")
+
+```
+
+## 2.2. Linear mixed effects models comparing multi- vs. mono-specific meadows (`Meadow_type`)
+With this analysis we are interested in knowing the influence of the categorical factor `Meadow_type` (2 levels: monospecific, multispecific) on the response variable `cstocks` (remember that `cstocks` are 20-cm-carbon-stocks). From the previous models, we know that the Species ID of the seagrass is very important in determining `cstocks`. As a result, when comparing mono- vs. multi-specific meadows, we must compare monospecific meadows, with multispecific meadows made of seagrasses for which we have monospecific information. Otherwise the comparison doesn't make sense. To this end, we will first produce a list with all the `Species` present in the cores from multispecific meadows from our data set:
+
+```{r, include=FALSE}
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+# 3. Modelling the response 20cm-carbon stocks. Focusing on the effect of MEADOW TYPE (mono vs multispecific) ----
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+
+rm(list = ls())
+
+library(nlme)
+# library(car)
+library(modelr)
+library(multcomp)
+library(ggsci)
+
+source("01_DataImport&Corrections_CarbonReview.R")
+source("mcheck_function.R")
+rm(list = c("cstocks_tidy", "cstocks")) # Because we want to use, only, the 20 cm stocks data, not carbon densities.
+
+# Meadow type cannot be assessed with the previous model, because there, we're assessing the effect of Species, and
+# by definition, the effect of Species must be tested on MONOSPECIFIC meadows.
+# We separate the variable Species into 5 species columns, to be able to know the different species present in multispecific meadows.
+cstocksSpeciesSep <- cstocks_tidy20Stocks %>% 
+  mutate(Lat_Zone_Posi = ifelse(Posi == "Posi", "Posi", Lat_Zone),
+         Lat_Zone = factor(Lat_Zone),
+         CoreID_unique = factor(CoreID_unique),
+         FIN_TYP_names = factor(recode(FIN_TYP,
+                                       `0` = "Endorheic or Glaciated",
+                                       `1` = "Small deltas",
+                                       `2` = "Tidal systems",
+                                       `3` = "Lagoons",
+                                       `4` = "Fjords and fjaerds",
+                                       `5` = "Large rivers",
+                                       `6` = "Karst",
+                                       `7` = "Arheic"))) %>% 
+  separate(Species, into = c("Sp1", "Sp2", "Sp3", "Sp4", "Sp5"), sep = ", ")
+
+# We summarise the complete list of species present in multispecific meadows
+listSpeciesMulti <-  cstocksSpeciesSep %>% 
+  filter(Meadow_type == "multispecific") %>% 
+  select(Sp1:Sp5) %>% 
+  gather(key = "Species", value = "value") %>% 
+  group_by(value) %>% 
+  summarise(n = n()) %>% 
+  filter(!is.na(value))
+
+listSpeciesMulti <- listSpeciesMulti$value
+listSpeciesMulti <- c(listSpeciesMulti, "Amphibolis spp", "Posidonia spp")
+```
+
+```{r, echo=FALSE}
+as_tibble(listSpeciesMulti)
+```
+
+We now use this list of `Species` that make up the multispecific meadows, and use it to filter the data set, to only get monospecific meadows made of seagrass species that can also appear in multispecific meadows.
+
+```{r, include=FALSE}
+# Now we select those cores either from multispecific meadows, or from monospecific meadows, 
+# made up of species that also can occurr in multispecific meadows (e.g. not posidonia oceanica)
+cstocks_data <- cstocksSpeciesSep %>% 
+  filter(Sp1 %in% listSpeciesMulti) %>% 
+  select(CoreID_unique, Meadow_type, Latitude, FIN_TYP_names, Nearest_distance, Lat_Zone, Lat_Zone_Posi, Source, depth, cstocks) %>% 
+  # select(Meadow_type, depth, Source, cstocks) %>% 
+  filter_all(all_vars(!is.na(.)))  
+
+# To remove typologies that do not have multispecific meadows (e.g. polar zones)
+cstocks_data$FIN_TYP_names <- droplevels(cstocks_data$FIN_TYP_names)
+```
+
+At this stage, we already know that the geomorphology (`FIN_TYP_names`) characteristics from where the core was taken will influence `cstocks`. However, with this model we're only interested in checking if the fixed factor `Meadow_type` influences `cstocks`. To this end, given that we're not interested in assessing the influence of particular levels of `FIN_TYP_names` on `cstocks`, we will move these predictors to the random part of the model (that already contains `Source` and `CoreID_unique` nested in `Source`, as in previous models). Thus, the only predictor in the fixed part of the model will be `Meadow_type`. To take care of such a complex random part, we will need to use the package `lme4` instead of `nlme`. 
+
+```{r, warning=FALSE, message=FALSE}
+mfinal <- lme4::lmer(log(cstocks) ~ Meadow_type + (1|Source/CoreID_unique) + (1|FIN_TYP_names), data = cstocks_data)
+car::Anova(mfinal)
+```
+
+This model shows that `Meadow_type` appears to influence `cstocks`. But let's validate the model.
+
+### 2.2.1. Model validation
+Let's first check model residuals vs. fitted values and qqplots.
+
+```{r, echo=FALSE, warning=FALSE}
+mcheck(mfinal)
+```
+Both plots look quite good. Let's now check fitted vs. response values.
+```{r,echo=FALSE, message=FALSE, warning=FALSE}
+plot(fitted(mfinal) ~ log(cstocks_data$cstocks), col="darkgrey", 
+     xlab="Y (response)", ylab="Fitted Values")
+abline(a=0, b=1, col="red")
+```
+Which again looks OK. So, the model is good. And it tells us there is an effect of `Meadow_type`, but in what direction? Between which levels? Let's do multiple comparisons.
+
+### 2.2.2. Multiple comparisons (Tukey post-hoc tests)
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Multiple comparisons with library(multcompar)
+# For Meadow_type 
+multcompar_meadowType <- glht(mfinal, linfct=mcp(Meadow_type="Tukey"))
+summary_multcompar_meadowType <- broom::tidy(summary(multcompar_meadowType))
+letters_multcompar_meadowType <- broom::tidy(cld(multcompar_meadowType))
+# Significant multiple comparisons
+summary_multcompar_meadowType %>%
+  filter(adj.p.value<0.05) %>%
+  print(n = Inf)
+```
+Good, so there are significant differences between `cstocks` from mono and multispecific meadows. Let's check plots.
+
+### 2.2.3. Plotting main effects
+We now check graphically the influence of `Meadow_type` on `cstocks`. We see that cores taken multispecific meadows in general have higher `cstocks`.
+
+Let's print the data in table format before checking the plot:
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# # # # # # # # # # # # # # # # # # # # #
+# Plotting MEADOW TYPE EFFECT ----
+# # # # # # # # # # # # # # # # # # # # #
+cstocksFilteredMonoMulti2 <- cstocksSpeciesSep %>% 
+  filter(Sp1 %in% listSpeciesMulti) %>% 
+  filter(!is.na(cstocks)) %>% 
+  group_by(Meadow_type) %>% 
+  summarise(n = n(),
+            mean_stocks = mean(cstocks),
+            median_stocks = median(cstocks),
+            error_stocks = std.error(cstocks),
+            max_stocks = max(cstocks)) %>% 
+  left_join(letters_multcompar_meadowType, by = 'Meadow_type') %>% 
+  print(n = Inf)
+```
+
+
+```{r,echo=FALSE, warning=FALSE, message=FALSE}
+cstocks_data %>% 
+  ggplot(aes(x = Meadow_type, y = cstocks)) +
+  geom_boxplot(aes(fill = Meadow_type, colour = Meadow_type)) +
+  stat_summary(fun=median, geom="point", shape = 15, size = 2) +
+  scale_fill_manual(values = c("#31a354", "#b2df8a")) +
+  scale_colour_manual(values = c("#31a354", "#b2df8a")) +
+  geom_text(data = cstocksFilteredMonoMulti2, aes(x = Meadow_type, y = max_stocks + 5, label = str_c("(", n, ")"))) +
+  geom_text(data = cstocksFilteredMonoMulti2, aes(x = Meadow_type, y = max_stocks + 10, label = letters)) +
+  scale_x_discrete(labels = c("Monospecific", "Multispecific")) +
+  xlab("Meadow type") +
+  ylab(bquote('Carbon density (Mg C' ~ha^-1~cm^-1* ')')) +
+  coord_flip() +
+  theme_bw() +
+  theme(legend.position = 'none',
+        text = element_text(size=14),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+```
+
+# 3. Principal Component Analysis
+In this section, now that we know that `Species` is the main factor determining `cstocks`, we want to understand which biological traits makes each seagrass species, the species it is. That is, which biological traits define each seagrass species. In this way, we might understand which biological traits make `Species` such as *P. oceanica* have higher `cstocks`. To do so, we first load a data set that collates information on 36 seagrass traits, for 15 seagrass species. However, as is typical in these kinds of analyses, we have quite a lot of holes (cells with `NA`) in our data set. So we'll run three different PCAs. 
+
+## 3.1. PCA with all traits (hence few species)
+The `Species` *Cymodocea rotundata*, *Halophila ovalis*, *Thalassia testudinum*, *Zostera marina* and *Zostera noltii* are the only ones for which we have data for all 36 traits. Since according to previous sections, there aren't big `cstocks` differences among these species, let's drop just one trait and at least we'll be able to include *P.oceanica* information too. The trait we're dropping is `L.ndf`.
+
+```{r, echo = FALSE, message=FALSE, warning = FALSE}
+
+# # # # # # # # #
+# LIBRARIES ----
+# # # # # # # # #
+
+library(tidyverse)
+library(ggfortify)
+
+# # # # # # # # # # # # # # # # # # # # # # # # 
+# Loading TRAITS data set and checking NAs ----
+# # # # # # # # # # # # # # # # # # # # # # # #
+
+traits <- read_csv(file = "Seagrass_traits_nov2020.csv")
+
+SpeciesNAs <- traits %>% 
+  mutate(NAs = rowSums(is.na(.)), ) %>% 
+  select(Species, NAs)
+
+colNAs <- traits %>% 
+  # filter(Species != "Thalassodendron ciliatum") %>%
+  select(-Species) %>% 
+  is.na %>% 
+  colSums
+traitsNAs <- tibble(traits = names(traits)[-1], colNAs)
+
+
+# # # # # # # # # # # # # # # # # # #
+# PCA with all TRAITS        ----
+# (we have to delete species with NAs)
+# # # # # # # # # # # # # # # # # # #
+
+# Cymodocea rotundata, Halophila ovalis, Thalassia testudinum, Zostera marina, Zostera noltii 
+# are the only species with data for all traits. Since according to previous figures, there aren't big C-density differences
+# among these species, let's drop 1 trait, and at least we'll be able to include P.oceanica information too. 
+
+# So, we drop trait called L.ndf, to be able to use P.oceanica trait data too
+alltraits_df  <-  traits %>% 
+  select(-L.ndf) %>% 
+  mutate(NAs = rowSums(is.na(.)), ) %>% 
+  filter(NAs == 0) %>% 
+  select(-NAs)
+
+alltraits_PCA <- prcomp(alltraits_df[,-1], scale. = TRUE)
+p1 <- autoplot(alltraits_PCA, data = alltraits_df, colour = "Species")
+p1 + coord_cartesian(xlim = c(-0.8, 0.8))
+p2 <- autoplot(alltraits_PCA, 
+         data = alltraits_df, 
+         colour = "Species", 
+         loadings = TRUE, 
+         loadings.label = TRUE, 
+         loadings.label.hjust = 1.1)
+p2 + coord_cartesian(xlim = c(-0.8, 0.8))
+```
+Just the two first components of the PCA explain 78% of the variance in seagrass traits. PC1 can be interpreted as an axis of big and slow-growing species on the right of the plot VS. small and faster-growing species on the left. It's an axis of R-K strategies. PC2 appears to be linked to nutrients and productivity. 
+
+## 3.2. PCA with all species (hence much less traits)
+In order to make a PCA of the maximum number of species, we're going to drop several traits, namely:
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+# # # # # # # # # # # # # # # # # # #
+# PCA with all SPECIES        ----
+# (we have to drop traits with NAs)
+# # # # # # # # # # # # # # # # # # #
+
+traits_missing <- traitsNAs %>% 
+  filter(colNAs > 0) %>%
+  select(traits) %>% 
+  print()
+```
+
+The list of traits that are present for all species is the following:
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+traits_full <- traitsNAs %>% 
+  filter(colNAs == 0) %>% 
+  select(traits) %>% 
+  print()
+```
+
+Now let's run the analysis and check the results biplots.
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+allspecies_df <- as.data.frame(traits[,which(names(traits) %in% traits_full$traits)])
+rownames(allspecies_df) <- traits$Species
+
+allspecies_PCA <- prcomp(allspecies_df, scale. = TRUE)
+# autoplot(allspecies_PCA, data = allspecies_df)
+autoplot(allspecies_PCA, 
+         data = allspecies_df, 
+         label = TRUE, loadings = TRUE,
+         loadings.label = TRUE, 
+         loadings.label.hjust = 1.1) + coord_cartesian(xlim = c(-0.6, 0.4))
+# ggsave(filename = "Figs/PCA_allspecies_biplot.pdf")
+```
+Note that the explained variance is lower now, which makes sense because we're trying to describe more species with less traits. All in all though, the interpretation of PC1 and PC2 remain the same. PC1 an axis of slow- vs. fast-growing species and PC2 an axis of productivity and nutrients.
+
+## 3.3. PCA with all species except *Thalassodendron ciliatum* (because it has lots of missing data)
+We first check which traits we need to drop to run this analysis (all those that have at least one missing value), namely:
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+# PCA with all SPECIES BUT Thalassodendron ciliatum       ----
+# (because this species has lots of missing trait data)
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+
+colNAs_thalasso <- traits %>% 
+  filter(Species != "Thalassodendron ciliatum") %>%
+  select(-Species) %>% 
+  is.na %>% 
+  colSums
+
+traitsNAs_thalasso <- tibble(traits = names(traits)[-1], colNAs_thalasso)
+
+traits_missing_thalasso <- traitsNAs_thalasso %>% 
+  filter(colNAs_thalasso > 0) %>% 
+  select(traits) %>% 
+  print()
+```
+And this is the list of traits for which we have information for all species (except *T. ciliatum* which has been dropped from this data set).
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+traits_full_thalasso <- traitsNAs_thalasso %>% 
+  filter(colNAs_thalasso == 0) %>% 
+  select(traits) %>% 
+  print(n = Inf)
+```
+We now run the PCA and observe the biplots.
+
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+allspecies_df_thalasso <- as.data.frame(traits[, which(names(traits) %in% traits_full_thalasso$traits)])
+rownames(allspecies_df_thalasso) <- traits$Species
+
+allspecies_df_thalassoOK <- allspecies_df_thalasso %>% 
+  mutate(Species = rownames(.)) %>% 
+  filter(Species != "Thalassodendron ciliatum") %>% 
+  select(-Species)
+rownames(allspecies_df_thalassoOK) <- rownames(allspecies_df_thalasso)[-13] # the position of Thalassodendron ciliatum
+  
+# PCA for all species except Thalassodendron ciliatum and as many traits as possible
+allspecies_PCA_thalasso <- prcomp(allspecies_df_thalassoOK, scale. = TRUE)
+# autoplot(allspecies_PCA_thalasso, data = allspecies_df_thalassoOK)
+autoplot(allspecies_PCA_thalasso, 
+         data = allspecies_df_thalassoOK, 
+         label = TRUE, 
+         loadings = TRUE, 
+         loadings.label = TRUE, 
+         loadings.label.hjust = 1.1) + coord_cartesian(xlim = c(-0.4, 0.6))
+# ggsave(filename = "Figs/PCA_allspecies_but_Thalasso_biplot.pdf")
+```
+With this PCA, we've managed to increase the explained variance, and PC1 now explains already 41% of it. PC1 is again an axis of big and slow-growing species on the right vs. small fast-growing on the left. And PC2 an axis of aboveground production and nutrients. Note that species are very well separated on the PC1 and PC2 axes.
+
+# 4. Partial Least Squares Regression
+We will finally apply a PLSR to our data set. PLSR is particularly good at dealing with data sets with lots of correlated predictors of a response variable. Think of this analysis as taking the scores of PC1 and PC2 from the PCA from the previous section and using them as predictors of the response variable of interest, in this case `cstocks`. In this way, we'll be able to assess which traits drive the observed differences in `cstocks` by `Species`.
+
+## 4.1. PLSR with all species but *Thalassodendron ciliatum*
+
+```{r, include=FALSE}
+# MIGHT BE BETTER TO RUN THIS CHUNK DIRECTLY ON THE CONSOLE
+# # # # # # # # #
+# LIBRARIES ----
+# # # # # # # # #
+
+library(tidyverse)
+library(tidylog)
+library(pls)
+library(caret)
+library(matrixStats)
+library(ggsci)
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # 
+# Loading TRAITS data set and checking NAs ----
+# # # # # # # # # # # # # # # # # # # # # # # #
+
+# Loading traits data
+traits <- read_csv(file = "Seagrass_traits_nov2020.csv")
+traits2 <- read_csv(file = "Seagrass_traits_nov2020+d13soil.csv")
+traits == traits2[,-(38:40)] # OK just to check that both data sets are the same. And they are. 
+traits <- traits2 # We choose traits2, because it's the one with d13Csoil data.
+rm(list = "traits2")
+
+# According to what we talked with H. Kennedy, we complete surf.d13C for Z.noltii with the value from Z.marina.
+traits$surf.d13C[which(traits$Species == "Zostera noltii")] <- -19.7
+
+# We'll do it with all species that have d13C but Thalassodendron, in this way we get the most traits for most species.
+traits_full <- traits %>% 
+  # select(-surf_20cm.d13C, -cm20_50.d13C) %>% 
+  filter(Species != "Thalassodendron ciliatum") %>% 
+  # filter(Species != "Posidonia oceanica") %>%
+  select(where(~!any(is.na(.)))) # This line drops any column containing a missing value
+
+# To be used as filtering vector in the next section 
+SpeciesList <- traits_full$Species
+
+
+# Loading carbon stock data
+source("01_DataImport&Corrections_CarbonReview.R")
+rm(list = c("cstocks_tidy", "cstocks")) # Because we want to use, only, the 20 cm stocks data, not carbon densities.
+
+cstocks_data <- cstocks_tidy20Stocks %>% 
+  filter(Meadow_type == "monospecific") %>%
+  mutate(Lat_Zone_Posi = ifelse(Posi == "Posi", "Posi", Lat_Zone),
+         Lat_Zone = factor(Lat_Zone),
+         CoreID_unique = factor(CoreID_unique),
+         Geomorph = factor(recode(FIN_TYP,
+                                       `0` = "Endorheic or Glaciated",
+                                       `1` = "Small deltas",
+                                       `2` = "Tidal systems",
+                                       `3` = "Lagoons",
+                                       `4` = "Fjords and fjaerds",
+                                       `5` = "Large rivers",
+                                       `6` = "Karst",
+                                       `7` = "Arheic"))) %>% 
+  select(CoreID_unique, Latitude, Species, Geomorph, Nearest_distance, Lat_Zone, Lat_Zone_Posi, Source, depth, cstocks) %>% 
+  filter_all(all_vars(!is.na(.)))  
+
+# Otherwise the model might try to calculate coefficients for levels that no longer exist.
+cstocks_data$Geomorph <- droplevels(cstocks_data$Geomorph)
+
+# The full data set with traits + "raw" cstocks data + other contextual predictors (e.g Fintype, depth...)
+cstocks_traits <- cstocks_data %>% 
+  filter(!is.na(cstocks)) %>% 
+  filter(Species %in% SpeciesList) %>%
+  left_join(traits_full, by = "Species") %>%
+  mutate(diff_LvsSurfd13C = surf.d13C - L.d13C) %>% 
+  select(Species,
+         cstocks,
+         depth,
+         Geomorph,
+         Lat_Zone,
+         starts_with("L."),
+         "ABG.biomass",
+         "BG.biomass",
+         "Ratio.AGBGbiomass",
+         starts_with("R."),
+         "N.leaves.shoot",
+         diff_LvsSurfd13C,
+         -L.d13C)
+
+
+# Looped version with diff_LvsSurfd13C ----
+predictor.var.out <- NULL
+outcome.var.out <- NULL
+bestTune <- NULL
+bestTune.out <- NULL
+r2 <- NULL
+r2.out <- NULL
+varImp <- NULL
+imp.out <- NULL
+coef1.out <- NULL
+coef2.out <- NULL
+cstocks_traits <- as.data.frame(cstocks_traits)
+# scoresPlsr1.out <- NULL
+for(i in 1:100){
+  # We’ll randomly split the data into training set (80% for building a predictive model) 
+  # and test set (20% for evaluating the model). Make sure to set seed for reproducibility.
+  # Split the data into training and test set
+  # set.seed(123)
+  training.samples <- createDataPartition(cstocks_traits$cstocks, p = 0.8, list = FALSE)
+  train.data  <- cstocks_traits[training.samples, ]
+  test.data <- cstocks_traits[-training.samples, ]
+  
+  # The R function train() [caret package] provides an easy workflow to compute PCR and PLS by invoking the pls package.
+  # It has an option named method, which can take the value pcr or pls.
+  # An additional argument is scale = TRUE for standardizing the variables to make them comparable.
+  # caret uses cross-validation to automatically identify the optimal number of principal components (ncomp) to be incorporated in the model.
+  # Here, we’ll test 10 different values of the tuning parameter ncomp. 
+  # This is specified using the option tuneLength. 
+  # The optimal number of principal components is selected so that the cross-validation error (RMSE) is minimized.
+  
+  # Build the model on training set
+  # set.seed(123)
+  fitControl <- trainControl(method = "cv",  number = 10)
+  model.initial <- train(cstocks ~ Geomorph + Lat_Zone + L.width + L.length +
+                           L.fibre + L.breakforce + L.lifespan + L.carbon + L.nitrogen + L.phosphorus + 
+                           L.ratioNP + L.ratioCN + L.ratioCP + L.lignin + L.product.rate + L.plastochrone.interv + 
+                           L.turnover + ABG.biomass + BG.biomass + Ratio.AGBGbiomass + R.diameter + 
+                           R.internode.length + R.helong.rate + R.plastochrone.interv + N.leaves.shoot + diff_LvsSurfd13C,
+                         data = train.data, 
+                         method = "simpls",
+                         scale = TRUE,
+                         trControl = fitControl,
+                         tuneLength = 27)
+  
+  # Print the best tuning parameter ncomp that minimizes the cross-validation error, RMSE
+  bestTune <- model.initial$bestTune
+  
+  # Summarize the final model
+  # summary(model.initial$finalModel)
+  predictor.var <- str_extract(capture.output(summary(model.initial))[7], "[0-9]+")
+  outcome.var <- str_extract(capture.output(summary(model.initial))[8], "[0-9]+")
+  
+  model.coefficients <- as_tibble(model.initial$finalModel$coefficients)
+  model.coefficients.tibble <- tibble(predictors = rownames(model.initial$finalModel$coefficients), model.coefficients)
+  coef1 <- model.coefficients.tibble$`.outcome.1 comps`
+  
+  # Model loadings
+  model.loadings <- model.initial$finalModel$loadings
+  model.loadings1.tibble <- tibble(predictors = rownames(model.initial$finalModel$loadings), model.initial$finalModel$loadings[,1])
+  loadings1 <- as.numeric(model.loadings1.tibble$`model.initial$finalModel$loadings[, 1]`)
+  # if(bestTune > 1){
+  #   coef2 <- model.coefficients.tibble$`.outcome.2 comps`
+  # }
+  
+  # Variable Importance on the Projection
+  varIMP <- varImp(model.initial, scale = FALSE)
+  
+  # Model performance metrics
+  predictions <- model.initial %>% predict(test.data)
+  r2 <- caret::R2(predictions, test.data$cstocks)
+  #  Rsquare
+  #  0.45
+  
+  # # Make predictions an plot them in 1:1 plots to see residual variation
+  # test.data$predictions <- model.initial %>% 
+  #   predict(test.data)
+  # p <- ggplot(data = test.data, mapping = aes(x = predictions, y = cstocks)) +
+  #   geom_point(aes(colour = Species)) +
+  #   scale_colour_d3("category20", 
+  #                   alpha = 1,
+  #                   guide = guide_legend(override.aes = list(size = 3,
+  #                                                            alpha = 1))) +
+  #   geom_abline() +
+  #   # coord_cartesian(xlim = c(0,10), ylim = c(0,10)) +
+  #   ylab(bquote('Observed C density (Mg C' ~ha^-1~cm^-1* ')')) +
+  #   xlab("Predicted C density (PLSR)") + 
+  #   theme_bw() +
+  #   theme(text = element_text(size=14),
+  #         panel.grid.major = element_blank(), 
+  #         panel.grid.minor = element_blank())
+  # p + annotate(geom = "text", x = 25, y = 160, label = bquote(R^2 == .(round(r2, 2))))
+  # ggsave(filename = "Figs/PLSRnotLooped/cstocksVSpredicted_not_loopR2=0.52OK.pdf")
+  # Predictions are not super good, but overall the species effect is very obvious. With some intraspecific residual variance
+  # that it's escaping our model (we're not managing to predict this intraspecific variance).
+  
+  if(i == 1){
+    imp.out <- varIMP$importance
+    loadings1.out <- loadings1
+    # if(bestTune > 1){
+    #   coef2.out <- coef2
+    # }
+  }
+  else{
+    imp.out <- cbind(imp.out, varIMP$importance)
+    loadings1.out <- cbind(loadings1.out, loadings1)
+    # if(bestTune > 1){
+    #   coef2.out <- cbind(coef2.out, coef2)
+    # }
+  }
+  r2.out <- c(r2.out, r2)
+  bestTune.out <- c(bestTune.out, bestTune[[1]])
+  predictor.var.out <- c(predictor.var.out, predictor.var)
+  outcome.var.out <- c(outcome.var.out, outcome.var)
+  # if(i<20){
+  #   train.data$scoresPlsr1 <- model.initial$finalModel$scores[1:392,1]
+  #   ggplot(data = train.data, mapping = aes(x = scoresPlsr1, y = cstocks)) +
+  #     geom_point(aes(colour = Species)) +
+  #     geom_smooth(method = "lm", se=T, colour = "black") + 
+  #     theme_bw() +
+  #     theme(text = element_text(size=14),
+  #           panel.grid.major = element_blank(), 
+  #           panel.grid.minor = element_blank())
+  #   file_name <- paste("Figs/PLSRLooped/SpeciesVSplsr1_i", i, ".pdf", sep = "")
+  #   ggsave(filename = file_name)
+  # }
+}
+
+
+# Variable importance
+names(imp.out) <- 1:100
+# imp.out <- as.data.frame(t(imp.out))
+# imp.means <- sort(colMeans(imp.out), decreasing = T)
+# imp.sds <- colSds(as.matrix(imp.out))
+imp.means <- rowMeans(imp.out)
+imp.sds <- rowSds(as.matrix(imp.out))
+imp.summarised <- as.data.frame(cbind(imp.means, imp.sds))
+imp.summarised$x <- rownames(imp.summarised)
+
+
+# Loadings 1st component
+loadings1.out <- as.data.frame(loadings1.out)
+rownames(loadings1.out) <- rownames(imp.summarised)
+names(loadings1.out) <- 1:100
+loadings1.means <- rowMeans(loadings1.out)
+loadings1.sds <- rowSds(as.matrix(loadings1.out))
+loadings1.summarised <- as.data.frame(cbind(loadings1.means, loadings1.sds))
+loadings1.summarised$x <- rownames(imp.summarised)
+
+
+# Best tune
+mean(bestTune.out) # 9.27 components
+sd(bestTune.out) # 0.94 components
+min(bestTune.out) # 7 components
+getmode <- function(v) {
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+getmode(bestTune.out) # 9 components is the most frequent one
+
+bestTune.out <- as.data.frame(bestTune.out)
+
+max(bestTune.out)
+
+bestTune.out %>% 
+  mutate(name = as.factor(bestTune.out)) %>% 
+  group_by(name) %>% 
+  summarise(n = n()) %>% 
+  ggplot(aes(x = name, y = n)) +
+  geom_bar(stat = 'identity')
+
+bestTune.out %>% 
+  mutate(name = as.factor(bestTune.out)) %>% 
+  group_by(name) %>% 
+  summarise(n = n()) %>%
+  mutate(percent = (n/sum(n))*100) %>% 
+  ggplot(aes(x = name, y = percent)) +
+  geom_bar(stat = 'identity') +
+  ylim(c(0,100)) + 
+  ylab("%") +
+  xlab('Number of components') + 
+  theme_bw() +
+  theme(text = element_text(size=14),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+# ggsave('Figs/PLSRLooped/NumberOfComponents.pdf')
+
+# R2
+mean(r2.out) # R2 = 0.4270163
+sd(r2.out)
+min(r2.out)
+max(r2.out)
+```
+We first check the variable importance on the projection plot. In dark blue, we show the most important variables in influencing `cstocks` and simultaneously summarising the observed variance (like in the pca).
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+
+# Variable importance on the projection
+ggplot(data = pivot_longer(as_tibble(t(imp.out)), cols = 1:32), aes(y = value, x = reorder(name, value, FUN = median))) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_hline(yintercept = 1, lty = 2) +
+  xlab(label = "") + 
+  ylab(label ="Variable Importance in Projection") +
+  coord_flip() +
+  theme_bw() +
+  theme(legend.position = "none",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        text = element_text(size = 12))
+
+```
+Then we check the coefficients of each variable on 1st component.
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+# PLSR Coefficients 1st component
+imp.summarised <- pivot_longer(as_tibble(t(imp.out)), cols = 1:32) %>% 
+  group_by(name) %>% 
+  summarise(mean = mean(value)) %>% 
+  mutate(fill = as.numeric(mean < 1))
+  
+
+# PLSR Loadings 1st component
+loadings1.summarised %>% 
+  # mutate(fill = ifelse(test = x %in% c("N.leaves.shoot", "BG.biomass", "L.lifespan", "L.d13C", "ABG.biomass", "L.lignin", "L.carbon"), 
+  #                      yes = 1, no = 2)) %>% 
+  left_join(imp.summarised, by = c("x" = "name")) %>% 
+  filter(fill == 0) %>% 
+  ggplot(aes(x = reorder(x, loadings1.means, FUN = max), y = loadings1.means, fill = fill)) + 
+  geom_bar(stat="identity", colour = "black", show.legend = F) +
+  geom_errorbar(aes(ymin=loadings1.means - loadings1.sds, ymax = loadings1.means + loadings1.sds), width=.2, position=position_dodge(0.9)) + 
+  ylab("PLSR loadings 1st component") +
+  xlab("") + 
+  # scale_y_continuous(limits = c(-2, 2)) +
+  coord_flip() +
+  theme_bw() +
+  theme(legend.position = "none",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        text = element_text(size = 12))
+```
+And finally plot the PLSR scores VS. response variable, to see the influence of PLSR1 on `cstocks`.  
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+train.data$scoresPlsr1 <- model.initial$finalModel$scores[1:432,1]
+ggplot(data = train.data, mapping = aes(x = scoresPlsr1, y = cstocks)) +
+  geom_point(aes(colour = Species)) +
+  # scale_colour_simpsons(alpha = 1) +
+  scale_colour_d3("category20", 
+                  alpha = 0.5,
+                  guide = guide_legend(override.aes = list(size = 3,
+                                                           alpha = 1))) +
+  geom_smooth(method = "lm", se=T, colour = "black") + 
+  xlab("PLSR scores 1st component") + 
+  ylab(bquote(~C[20]~ 'stock (Mg C' ~ha^-1* ')')) +
+  theme_bw() +
+  theme(text = element_text(size=12),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+```
+To read this plot, bear in mind that high values of PLSR1 imply (see previous plot of PLSR coefficients) high belowground biomass, long leaf lifespan, high aboveground biomass, many leaves per shoot, and high lignin contents. Also, note that for each species there is a bit of 'noise' or some samples that are a bit shifted on the x axis. This is a result of different `Lat_Zone` and/or `FIN_TYP_names` for different cores from the same species.
+
+Now let's check the amount of variance explained by the model for the response variable (see `.outcome`) and for the predictors (see `X`).
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+summary(model.initial)
+```
+
+
+## 4.2. PLSR with all species but *Thalassodendron ciliatum* and **without** *Posidonia oceanica*
+What happens if we take out the most different species from the analysis (ie. *P.oceanica*)? Let's see.
+
+```{r, include=FALSE}
+# MIGHT BE BETTER TO RUN THIS CHUNK DIRECTLY ON THE CONSOLE
+
+# # # # # # # # #
+# LIBRARIES ----
+# # # # # # # # #
+
+library(tidyverse)
+library(tidylog)
+library(pls)
+library(caret)
+library(matrixStats)
+library(ggsci)
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # 
+# Loading TRAITS data set and checking NAs ----
+# # # # # # # # # # # # # # # # # # # # # # # #
+
+# Loading traits data
+traits <- read_csv(file = "Seagrass_traits_nov2020.csv")
+traits2 <- read_csv(file = "Seagrass_traits_nov2020+d13soil.csv")
+traits == traits2[,-(38:40)] # OK just to check that both data sets are the same. And they are. 
+traits <- traits2 # We choose traits2, because it's the one with d13Csoil data.
+rm(list = "traits2")
+
+# According to what we talked with H. Kennedy, we complete surf.d13C for Z.noltii with the value from Z.marina.
+traits$surf.d13C[which(traits$Species == "Zostera noltii")] <- -19.7
+
+# We'll do it with all species that have d13C but Thalassodendron, in this way we get the most traits for most species.
+traits_full <- traits %>% 
+  # select(-surf_20cm.d13C, -cm20_50.d13C) %>% 
+  filter(Species != "Thalassodendron ciliatum") %>% 
+  filter(Species != "Posidonia oceanica") %>%
+  select(where(~!any(is.na(.)))) # This line drops any column containing a missing value
+
+# To be used as filtering vector in the next section 
+SpeciesList <- traits_full$Species
+
+
+# Loading carbon stock data
+source("01_DataImport&Corrections_CarbonReview.R")
+rm(list = c("cstocks_tidy", "cstocks")) # Because we want to use, only, the 20 cm stocks data, not carbon densities.
+
+cstocks_data <- cstocks_tidy20Stocks %>% 
+  filter(Meadow_type == "monospecific") %>%
+  mutate(Lat_Zone_Posi = ifelse(Posi == "Posi", "Posi", Lat_Zone),
+         Lat_Zone = factor(Lat_Zone),
+         CoreID_unique = factor(CoreID_unique),
+         Geomorph = factor(recode(FIN_TYP,
+                                       `0` = "Endorheic or Glaciated",
+                                       `1` = "Small deltas",
+                                       `2` = "Tidal systems",
+                                       `3` = "Lagoons",
+                                       `4` = "Fjords and fjaerds",
+                                       `5` = "Large rivers",
+                                       `6` = "Karst",
+                                       `7` = "Arheic"))) %>% 
+  select(CoreID_unique, Latitude, Species, Geomorph, Nearest_distance, Lat_Zone, Lat_Zone_Posi, Source, depth, cstocks) %>% 
+  filter_all(all_vars(!is.na(.)))  
+
+# Otherwise the model might try to calculate coefficients for levels that no longer exist.
+cstocks_data$Geomorph <- droplevels(cstocks_data$Geomorph)
+
+# The full data set with traits + "raw" cstocks data + other contextual predictors (e.g Fintype, depth...)
+cstocks_traits <- cstocks_data %>% 
+  filter(!is.na(cstocks)) %>% 
+  filter(Species %in% SpeciesList) %>%
+  left_join(traits_full, by = "Species") %>%
+  mutate(diff_LvsSurfd13C = surf.d13C - L.d13C) %>% 
+  select(Species,
+         cstocks,
+         depth,
+         Geomorph,
+         Lat_Zone,
+         starts_with("L."),
+         "ABG.biomass",
+         "BG.biomass",
+         "Ratio.AGBGbiomass",
+         starts_with("R."),
+         "N.leaves.shoot",
+         diff_LvsSurfd13C,
+         -L.d13C)
+
+
+# Looped version with diff_LvsSurfd13C ----
+predictor.var.out <- NULL
+outcome.var.out <- NULL
+bestTune <- NULL
+bestTune.out <- NULL
+r2 <- NULL
+r2.out <- NULL
+varImp <- NULL
+imp.out <- NULL
+coef1.out <- NULL
+coef2.out <- NULL
+cstocks_traits <- as.data.frame(cstocks_traits)
+# scoresPlsr1.out <- NULL
+for(i in 1:100){
+  # We’ll randomly split the data into training set (80% for building a predictive model) 
+  # and test set (20% for evaluating the model). Make sure to set seed for reproducibility.
+  # Split the data into training and test set
+  # set.seed(123)
+  training.samples <- createDataPartition(cstocks_traits$cstocks, p = 0.8, list = FALSE)
+  train.data  <- cstocks_traits[training.samples, ]
+  test.data <- cstocks_traits[-training.samples, ]
+  
+  # The R function train() [caret package] provides an easy workflow to compute PCR and PLS by invoking the pls package.
+  # It has an option named method, which can take the value pcr or pls.
+  # An additional argument is scale = TRUE for standardizing the variables to make them comparable.
+  # caret uses cross-validation to automatically identify the optimal number of principal components (ncomp) to be incorporated in the model.
+  # Here, we’ll test 10 different values of the tuning parameter ncomp. 
+  # This is specified using the option tuneLength. 
+  # The optimal number of principal components is selected so that the cross-validation error (RMSE) is minimized.
+  
+  # Build the model on training set
+  # set.seed(123)
+  fitControl <- trainControl(method = "cv",  number = 10)
+  model.initial <- train(cstocks ~ Geomorph + Lat_Zone + L.width + L.length +
+                           L.fibre + L.breakforce + L.lifespan + L.carbon + L.nitrogen + L.phosphorus + 
+                           L.ratioNP + L.ratioCN + L.ratioCP + L.lignin + L.product.rate + L.plastochrone.interv + 
+                           L.turnover + ABG.biomass + BG.biomass + Ratio.AGBGbiomass + R.diameter + 
+                           R.internode.length + R.helong.rate + R.plastochrone.interv + N.leaves.shoot + diff_LvsSurfd13C,
+                         data = train.data, 
+                         method = "simpls",
+                         scale = TRUE,
+                         trControl = fitControl,
+                         tuneLength = 27)
+  
+  # Print the best tuning parameter ncomp that minimizes the cross-validation error, RMSE
+  bestTune <- model.initial$bestTune
+  
+  # Summarize the final model
+  # summary(model.initial$finalModel)
+  predictor.var <- str_extract(capture.output(summary(model.initial))[7], "[0-9]+")
+  outcome.var <- str_extract(capture.output(summary(model.initial))[8], "[0-9]+")
+  
+  model.coefficients <- as_tibble(model.initial$finalModel$coefficients)
+  model.coefficients.tibble <- tibble(predictors = rownames(model.initial$finalModel$coefficients), model.coefficients)
+  coef1 <- model.coefficients.tibble$`.outcome.1 comps`
+  
+  # Model loadings
+  model.loadings <- model.initial$finalModel$loadings
+  model.loadings1.tibble <- tibble(predictors = rownames(model.initial$finalModel$loadings), model.initial$finalModel$loadings[,1])
+  loadings1 <- as.numeric(model.loadings1.tibble$`model.initial$finalModel$loadings[, 1]`)
+  # if(bestTune > 1){
+  #   coef2 <- model.coefficients.tibble$`.outcome.2 comps`
+  # }
+  
+  # Variable Importance on the Projection
+  varIMP <- varImp(model.initial, scale = FALSE)
+  
+  # Model performance metrics
+  predictions <- model.initial %>% predict(test.data)
+  r2 <- caret::R2(predictions, test.data$cstocks)
+  #  Rsquare
+  #  0.45
+  
+  # # Make predictions an plot them in 1:1 plots to see residual variation
+  # test.data$predictions <- model.initial %>% 
+  #   predict(test.data)
+  # p <- ggplot(data = test.data, mapping = aes(x = predictions, y = cstocks)) +
+  #   geom_point(aes(colour = Species)) +
+  #   scale_colour_d3("category20", 
+  #                   alpha = 1,
+  #                   guide = guide_legend(override.aes = list(size = 3,
+  #                                                            alpha = 1))) +
+  #   geom_abline() +
+  #   # coord_cartesian(xlim = c(0,10), ylim = c(0,10)) +
+  #   ylab(bquote('Observed C density (Mg C' ~ha^-1~cm^-1* ')')) +
+  #   xlab("Predicted C density (PLSR)") + 
+  #   theme_bw() +
+  #   theme(text = element_text(size=14),
+  #         panel.grid.major = element_blank(), 
+  #         panel.grid.minor = element_blank())
+  # p + annotate(geom = "text", x = 25, y = 160, label = bquote(R^2 == .(round(r2, 2))))
+  # ggsave(filename = "Figs/PLSRnotLooped/cstocksVSpredicted_not_loopR2=0.52OK.pdf")
+  # Predictions are not super good, but overall the species effect is very obvious. With some intraspecific residual variance
+  # that it's escaping our model (we're not managing to predict this intraspecific variance).
+  
+  if(i == 1){
+    imp.out <- varIMP$importance
+    loadings1.out <- loadings1
+    # if(bestTune > 1){
+    #   coef2.out <- coef2
+    # }
+  }
+  else{
+    imp.out <- cbind(imp.out, varIMP$importance)
+    loadings1.out <- cbind(loadings1.out, loadings1)
+    # if(bestTune > 1){
+    #   coef2.out <- cbind(coef2.out, coef2)
+    # }
+  }
+  r2.out <- c(r2.out, r2)
+  bestTune.out <- c(bestTune.out, bestTune[[1]])
+  predictor.var.out <- c(predictor.var.out, predictor.var)
+  outcome.var.out <- c(outcome.var.out, outcome.var)
+  # if(i<20){
+  #   train.data$scoresPlsr1 <- model.initial$finalModel$scores[1:392,1]
+  #   ggplot(data = train.data, mapping = aes(x = scoresPlsr1, y = cstocks)) +
+  #     geom_point(aes(colour = Species)) +
+  #     geom_smooth(method = "lm", se=T, colour = "black") + 
+  #     theme_bw() +
+  #     theme(text = element_text(size=14),
+  #           panel.grid.major = element_blank(), 
+  #           panel.grid.minor = element_blank())
+  #   file_name <- paste("Figs/PLSRLooped/SpeciesVSplsr1_i", i, ".pdf", sep = "")
+  #   ggsave(filename = file_name)
+  # }
+}
+
+
+# Variable importance
+names(imp.out) <- 1:100
+# imp.out <- as.data.frame(t(imp.out))
+# imp.means <- sort(colMeans(imp.out), decreasing = T)
+# imp.sds <- colSds(as.matrix(imp.out))
+imp.means <- rowMeans(imp.out)
+imp.sds <- rowSds(as.matrix(imp.out))
+imp.summarised <- as.data.frame(cbind(imp.means, imp.sds))
+imp.summarised$x <- rownames(imp.summarised)
+
+
+# Loadings 1st component
+loadings1.out <- as.data.frame(loadings1.out)
+rownames(loadings1.out) <- rownames(imp.summarised)
+names(loadings1.out) <- 1:100
+loadings1.means <- rowMeans(loadings1.out)
+loadings1.sds <- rowSds(as.matrix(loadings1.out))
+loadings1.summarised <- as.data.frame(cbind(loadings1.means, loadings1.sds))
+loadings1.summarised$x <- rownames(imp.summarised)
+
+
+# Best tune
+mean(bestTune.out) # 9.27 components
+sd(bestTune.out) # 0.94 components
+min(bestTune.out) # 7 components
+getmode <- function(v) {
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+getmode(bestTune.out) # 9 components is the most frequent one
+
+bestTune.out <- as.data.frame(bestTune.out)
+
+max(bestTune.out)
+
+bestTune.out %>% 
+  mutate(name = as.factor(bestTune.out)) %>% 
+  group_by(name) %>% 
+  summarise(n = n()) %>% 
+  ggplot(aes(x = name, y = n)) +
+  geom_bar(stat = 'identity')
+
+bestTune.out %>% 
+  mutate(name = as.factor(bestTune.out)) %>% 
+  group_by(name) %>% 
+  summarise(n = n()) %>%
+  mutate(percent = (n/sum(n))*100) %>% 
+  ggplot(aes(x = name, y = percent)) +
+  geom_bar(stat = 'identity') +
+  ylim(c(0,100)) + 
+  ylab("%") +
+  xlab('Number of components') + 
+  theme_bw() +
+  theme(text = element_text(size=14),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+# ggsave('Figs/PLSRLooped/NumberOfComponents.pdf')
+
+# R2
+mean(r2.out) # R2 = 0.4270163
+sd(r2.out)
+min(r2.out)
+max(r2.out)
+```
+We first check the variable importance on the projection plot. In dark blue, there will be the most important variables in influencing `cstocks` and simultaneously summarising the observed variance (like in the pca).
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+
+# Variable importance on the projection
+ggplot(data = pivot_longer(as_tibble(t(imp.out)), cols = 1:32), aes(y = value, x = reorder(name, value, FUN = median))) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_hline(yintercept = 1, lty = 2) +
+  xlab(label = "") + 
+  ylab(label ="Variable Importance in Projection") +
+  coord_flip() +
+  theme_bw() +
+  theme(legend.position = "none",
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        text = element_text(size = 12))
+
+```
+However, now, none of the variables has a VIP>1. Note that instead of seagrass traits determining `cstocks`, now, if anything, it's geomorphology that seems a bit more important.
+
+We don't check the coefficients of each variable on 1st component, because not a single variable has a VIP>1.
+
+Anyway, let's just check what happens to the PLSR scores VS. response variable plot, to see the influence (or lack of influence in this case) of PLSR1 on `cstocks`.  
+```{r, echo=FALSE, message = FALSE, warning=FALSE}
+train.data$scoresPlsr1 <- model.initial$finalModel$scores[1:370,1]
+ggplot(data = train.data, mapping = aes(x = scoresPlsr1, y = cstocks)) +
+  geom_point(aes(colour = Species)) +
+  # scale_colour_simpsons(alpha = 1) +
+  scale_colour_d3("category20", 
+                  alpha = 0.5,
+                  guide = guide_legend(override.aes = list(size = 3,
+                                                           alpha = 1))) +
+  # geom_smooth(method = "lm", se=T, colour = "black") + 
+  xlab("PLSR scores 1st component") + 
+  ylab(bquote('Observed C stocks (Mg C' ~ha^-1* ')')) +
+  theme_bw() +
+  theme(text = element_text(size=14),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+```
+We can see that without *P. oceanica* the influence of PLSR1 on `cstocks` is limited (we do not see a trend). And (see below), we now do not explain much of the `cstocks` variance (see `.outcome` row below) with the predictors. 
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+summary(model.initial)
+```
