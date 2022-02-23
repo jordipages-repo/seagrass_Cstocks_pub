@@ -24,7 +24,7 @@ source("01_DataImport&Corrections_CarbonReview.R")
 # MAP WITH ALL CORES COLOURED BY MEAN CSTOCKS ----
 # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
-Df_coord <- cstocks_tidy %>% 
+Df_coord <- cstocks_tidy20Stocks %>% 
   select(Latitude, Longitude, cstocks) %>% 
   group_by(Latitude, Longitude) %>% 
   summarise(Samples = n(),
@@ -32,7 +32,7 @@ Df_coord <- cstocks_tidy %>%
   filter(!is.na(Latitude))
 
 # We build a world map from google
-api <- readLines("google.api") # Text file with the API key
+api <- readLines("~/Documents/FEINA/PROJECTS/3_MSCA_FOREPAST/ARTICLES/KennedySeagrassCarbonReview/Rproject_carbon_review/google.api") # Text file with the API key
 register_google(key = api)
 getOption("ggmap")
 has_google_key()
@@ -47,20 +47,22 @@ Map <- ggmap(ggmap = get_googlemap(center = c(lon = 10, lat = 0),
 
 # We plot the frequency of samples per coordinate combination as 'bubbles'
 Map +
-  geom_point(data=Df_coord, mapping = aes(x=Longitude, y=Latitude, colour = mean_stock), alpha = 1) +
+  geom_jitter(data=cstocks_tidy20Stocks %>% filter(!is.na(cstocks)), 
+              mapping = aes(x=Longitude, y=Latitude, colour = cstocks), 
+              alpha = 0.6, width = 2, height = 2) +
   scale_colour_continuous(type = "viridis", trans = "sqrt", name = bquote(atop('Carbon stock', '(Mg C' ~ha^-1* ')')), 
                           breaks=c(5,25,75,150),labels=c(5,25,75,150),
                           limits=c(2,150)) +
   scale_y_continuous(limits = c(-70,70)) +
   theme_bw()
-# ggsave(filename = "Figs/Core_coordinates_Map_Points_Coloured_by_meanStocks.pdf")
+# ggsave(filename = "~/Desktop/Core_coordinates_Map_Points_Coloured_by_meanStocks.pdf")
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # MAP WITH ALL CORES COLOURED BY MEADOW TYPE ----
 # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
-Df_coord2 <- cstocks_tidy %>% 
+Df_coord2 <- cstocks_tidy20Stocks %>% 
   select(Latitude, Longitude, Meadow_type) %>% 
   group_by(Latitude, Longitude, Meadow_type) %>% 
   summarise(Samples = n()) %>% 
@@ -84,14 +86,19 @@ Map +
 # stocks minus P.oceanica or else what might be better is to have a stacked bar chart with P. oceanica
 # stocks in a different fill to the other species, or maybe as a separate data set plotted on the same graph. 
 
-cstocks_tidy %>% 
+cstocks_tidy20Stocks %>%
+  filter(!is.na(cstocks)) %>% 
   ggplot() +
-  geom_histogram(aes(cstocks, fill = Posi), binwidth = 0.5, position = "stack", colour = "black", size = 0.2) +
-  xlab(bquote('Carbon density (Mg C' ~ha^-1* ')')) +
+  geom_histogram(aes(cstocks, fill = Posi), binwidth = 5, position = "stack", colour = "black", size = 0.1) +
+  geom_vline(aes(xintercept = median(cstocks, na.rm = T)), lty = 1, size = 0.4) +
+  geom_vline(aes(xintercept = mean(cstocks, na.rm = T)), lty = 3, size = 0.6) +
+  xlab(bquote(~C[20]~ 'stock (Mg C' ~ha^-1* ')')) +
   # scale_y_continuous(limits = c(0,270)) +
   # scale_x_continuous(limits = c(-5,270)) +
   scale_fill_manual(labels = c(expression(italic("Posidonia oceanica")), "Monospecific", "Mixed"),
                     values = c("#1f78b4", "#31a354", "#b2df8a")) +
+  scale_y_continuous(limits = c(0,190), expand = expansion(mult = c(0, 0))) +
+  # scale_x_continuous(limits = c(0,280), expand = expansion(mult = c(0, 0))) +
   # facet_wrap(~depth) +
   theme_bw() +
   theme(legend.title = element_blank(),
@@ -101,7 +108,11 @@ cstocks_tidy %>%
         text = element_text(size=14),
         panel.grid.major = element_blank(), 
         panel.grid.minor = element_blank())
-# ggsave(filename = "Figs/Cstocks_histogram_Posi_Mixed_Mono.pdf")
+# ggsave(filename = "~/Desktop/Cstocks_histogram_Posi_Mixed_Mono.pdf")
+
+mean(cstocks_tidy20Stocks$cstocks, na.rm = T) # 22.30844
+median(cstocks_tidy20Stocks$cstocks, na.rm = T) # 15.4
+
 
 ######
 
@@ -111,7 +122,7 @@ cstocks_tidy %>%
 # # # # # # # # # # # # # # # # # # # #
 
 # Scatter plot version
-cstocks_tidy %>% 
+cstocks_tidy20Stocks %>% 
   mutate(Latitude = round((Latitude))) %>% 
   group_by(Latitude, cstocks, Posi, depth) %>% 
   summarise(n = n()) %>% 
@@ -138,7 +149,7 @@ cstocks_tidy %>%
 
 
 # barplot version
-cstocks_tidy %>% 
+cstocks_tidy20Stocks %>% 
   filter(!is.na(Latitude)) %>%
   mutate(LatitudeRound = round(Latitude),
          LatitudeBinned = cut(Latitude, breaks = c(-70,-60,-50,-40,-30,-20,-10,0,10,20,30,40,50,60,70))) %>%
@@ -179,7 +190,7 @@ cstocks_tidy %>%
 # # # # # # # # # # # # # # # # # # # #
 
 # We want to get the means. 
-means <- cstocks_tidy %>% 
+means <- cstocks_tidy20Stocks %>% 
   filter(!is.na(cstocks)) %>% 
   filter(Meadow_type == "monospecific") %>% 
   group_by(depth) %>% 
@@ -189,7 +200,7 @@ means <- cstocks_tidy %>%
             max = max(cstocks))
 
 
-cstocks_tidy %>% 
+cstocks_tidy20Stocks %>% 
   filter(!is.na(cstocks)) %>% 
   group_by(depth, Meadow_type) %>% 
   summarise(n = n())
@@ -206,7 +217,7 @@ cstocks_tidy %>%
 # C stocks by species by depth with sample size coloured BARPLOTS ----
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
-cstocks_to_order <- cstocks_tidy %>% 
+cstocks_to_order <- cstocks_tidy20Stocks %>% 
   filter(Meadow_type == "monospecific") %>%
   filter(!is.na(cstocks)) %>%
   mutate(Species = factor(Species) %>%  fct_infreq() %>% fct_rev()) %>% 
@@ -249,7 +260,7 @@ ggplot(cstocks_to_order, aes(x = order, y = mean_cstocks, ymin = mean_cstocks-er
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
 
 # To count the sample size for each species and depth
-listSpeciesN <- cstocks_tidy %>%
+listSpeciesN <- cstocks_tidy20Stocks %>%
   filter(Meadow_type == "monospecific") %>%
   filter(!is.na(cstocks)) %>% 
   mutate(Species = factor(Species) %>%  fct_infreq() %>% fct_rev()) %>% 
@@ -263,7 +274,7 @@ listSpeciesN <- cstocks_tidy %>%
          nscale = ifelse(n<=10, "n≤10", "n>10"))
 
 # We join the above data set with the data set 
-cstocksN <- cstocks_tidy %>% 
+cstocksN <- cstocks_tidy20Stocks %>% 
   filter(Meadow_type == "monospecific") %>%
   filter(!is.na(cstocks)) %>% 
   left_join(listSpeciesN, by = c("Species", "depth"))
@@ -304,7 +315,7 @@ ggplot(cstocksN, aes(x = as.factor(order), y = cstocks)) +
 # # # # # # # # # # # # # # # # # # # # #
 
 # We separate the variable Species into 5 species columns, to be able to know the different species present in multispecific meadows.
-cstocksSpeciesSep <- cstocks_tidy %>% 
+cstocksSpeciesSep <- cstocks_tidy20Stocks %>% 
   separate(Species, into = c("Sp1", "Sp2", "Sp3", "Sp4", "Sp5"), sep = ", ")
 
 # We summarise the complete list of species present in multispecific meadows
@@ -375,7 +386,7 @@ cstocksFilteredMonoMulti2 %>%
 # # # # # # # # # # # # # # # # # # # #
 
 # We separate the variable Species into 5 species columns, to be able to know the different species present in multispecific meadows.
-cstocks_tropical <- cstocks_tidy %>% 
+cstocks_tropical <- cstocks_tidy20Stocks %>% 
   mutate(affinity = ifelse(abs(Latitude) <= 23, "tropical", ifelse(abs(Latitude) > 23 & Posi == "Posi", "Posi", "temperate"))) %>% 
   filter(!is.na(affinity)) %>% 
   select(Latitude, affinity, cstocks, depth, Posi) %>% 
@@ -408,7 +419,7 @@ cstocks_tropical %>%
 
 
 # Boxplot
-cstocks_tidy %>% 
+cstocks_tidy20Stocks %>% 
   mutate(affinity = ifelse(abs(Latitude) <= 23, "tropical", ifelse(abs(Latitude) > 23 & Posi == "Posi", "Posi", "temperate"))) %>% 
   filter(!is.na(affinity)) %>% 
   ggplot() +
