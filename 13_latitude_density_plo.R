@@ -25,7 +25,6 @@ source("01_DataImport&Corrections_CarbonReview.R")
 rm(list = c("cstocks_tidy", "cstocks")) # Because we want to use, only, the 20 cm stocks data, not carbon densities.
 
 
-
 # # # # # # # # # # # # # # # # #
 # Plotting latitude ----
 # # # # # # # # # # # # # # # # #
@@ -44,6 +43,6 @@ ggplot(data = cstocks_tidy20Stocks, aes(y = Latitude)) +
   theme(text = element_text(size=60),
         panel.grid.major = element_blank(), 
         panel.grid.minor = element_blank())
-ggsave(filename = "Figs/Final_Figures_March2021/latitude_density3.png")
+# ggsave(filename = "Figs/Final_Figures_March2021/latitude_density3.png")
 
 
