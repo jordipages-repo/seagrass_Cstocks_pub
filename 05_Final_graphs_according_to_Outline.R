@@ -6,6 +6,8 @@
 # # # # # # 
 
 library(RColorBrewer)
+library(viridis)
+library(ggsci)
 library(rgeos)
 library(gridExtra)
 library(scales)
@@ -218,23 +220,26 @@ histogram <- cstocks_tidy20Stocks %>%
   filter(!is.na(cstocks)) %>% 
   ggplot() +
   geom_histogram(aes(cstocks, fill = Posi), binwidth = 5, position = "stack", size = 0.1) +
-  geom_vline(aes(xintercept = median(cstocks, na.rm = T)), lty = 1, size = 0.5) +
+  geom_vline(aes(xintercept = median(cstocks, na.rm = T)), lty = 3, size = 0.5) +
   # geom_vline(aes(xintercept = mean(cstocks, na.rm = T)), lty = 2, size = 0.5) +
-  geom_vline(data = cstocks_tidy20Stocks %>% 
-               filter(!is.na(cstocks)) %>% 
-               group_by(Posi) %>% 
-               summarise(median = median(cstocks, na.rm = T)),
-             aes(xintercept = median, linetype = Posi), size = 0.5, colour = "grey20") +
+  # geom_vline(data = cstocks_tidy20Stocks %>% 
+             #   filter(!is.na(cstocks)) %>% 
+             #   group_by(Posi) %>% 
+             #   summarise(median = median(cstocks, na.rm = T)),
+             # aes(xintercept = median, linetype = Posi), size = 0.5, colour = "grey20") +
   xlab(bquote('OC stock (Mg C' ~ha^-1* ')')) +
-  # scale_y_continuous(limits = c(0,270)) +
-  # scale_x_continuous(limits = c(-5,270)) +
   scale_fill_manual(labels = c(expression(italic("P. oceanica")), "Monospecific", "Multispecific"),
-                    values = c("#B4DE2CFF", "#1F9E89FF", "#3E4A89FF")) +
-  scale_y_continuous(limits = c(0,190), expand = expansion(mult = c(0, 0))) +
-  scale_linetype_manual(labels = c(expression(italic("P. oceanica")), "Monospecific", "Multispecific"),
-                        values = rev(c(1, 2, 3))) +
+                    # values = viridis_pal(option = "mako")(3)) +
+                    values = c("#0B0405FF","#357BA2FF","#ADE3C0FF")) +
+  # scale_fill_d3(labels = c(expression(italic("P. oceanica")), "Monospecific", "Multispecific")) +
+                    # values = c("#FF7F0EFF", "#1F77B4FF", "#2CA02CFF")) +
+                    # values = pal_d3()(3)) +
+  scale_y_continuous(limits = c(0,190)) +
+  # scale_linetype_manual(labels = c(expression(italic("P. oceanica")), "Monospecific", "Multispecific"),
+                        # values = rev(c(1, 2, 3))) +
   # scale_x_continuous(limits = c(0,280), expand = expansion(mult = c(0, 0))) +
   # facet_wrap(~depth) +
+  coord_cartesian(xlim = c(0,265)) +
   theme_bw() +
   theme(legend.title = element_blank(),
         legend.position = c(0.8,0.4),
@@ -255,13 +260,28 @@ median(cstocks_tidy20Stocks$cstocks, na.rm = T) # 15.4
 # # # # # # # #
 # Combined map with CSTOCks and histogram ----
 # # # # # # # #
-plot_grid(histogram + theme(text = element_text(size = 15)),
+
+histocombi <- plot_grid(boxplots +
+            scale_fill_d3() +
+            scale_colour_d3() +
+            theme_void() + 
+            theme(legend.position = "none") + 
+            coord_flip(ylim = c(0,265)),
+          histogram,
+          nrow = 2, align = "v", rel_heights = c(1,7))
+histocombi
+
+plot_grid(histocombi + theme(text = element_text(size = 15)),
           pointsCstocks + theme(text = element_text(size = 15)),
           nrow = 2, 
           labels = "AUTO",
           rel_heights = c(3,4))
 
-ggsave("~/Desktop/Prova2.pdf", width = 185, height = 185, units = "mm", dpi = 350)
+# library(patchwork)
+# histocombi + theme(text = element_text(size = 15)) / pointsCstocks + theme(text = element_text(size = 15)) + 
+#   plot_layout(ncol = 1, heights = c(3,4)) + plot_annotation(tag_levels = 'A')
+
+# ggsave("~/Desktop/Prova3.pdf", width = 185, height = 185, units = "mm", dpi = 350)
 
 # # # # # # # # # # # # # # # # # # # #
 # C stocks along latitude by depth ----
@@ -351,7 +371,7 @@ means <- cstocks_tidy20Stocks %>%
 
 cstocks_tidy20Stocks %>% 
   filter(!is.na(cstocks)) %>% 
-  group_by(Meadow_type, depth) %>% 
+  group_by(Posi) %>% 
   summarise(n = n(),
             mean = mean(cstocks),
             median = median(cstocks),

@@ -1070,3 +1070,213 @@ cstocks_data %>%
 MuMIn::r.squaredGLMM(mfinal2)
 #       R2m       R2c
 # 0.007449527 0.7865999
+
+
+
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+# 4. Modelling the response 20cm-carbon stocks. Focusing on the effect of MEADOW TYPE (ALLmono vs multispecific) ----
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+
+rm(list = ls())
+
+library(nlme)
+library(car)
+library(modelr)
+library(multcomp)
+library(ggsci)
+
+source("01_DataImport&Corrections_CarbonReview.R")
+source("mcheck_function.R")
+rm(list = c("cstocks_tidy", "cstocks")) # Because we want to use, only, the 20 cm stocks data, not carbon densities.
+
+# Meadow type cannot be assessed with the previous model, because there, we're assessing the effect of Species, and
+# by definition, the effect of Species must be tested on MONOSPECIFIC meadows.
+# We separate the variable Species into 5 species columns, to be able to know the different species present in multispecific meadows.
+cstocksSpeciesSep <- cstocks_tidy20Stocks %>% 
+  mutate(Lat_Zone_Posi = ifelse(Posi == "Posi", "Posi", Lat_Zone),
+         Lat_Zone = factor(Lat_Zone),
+         CoreID_unique = factor(CoreID_unique),
+         FIN_TYP_names = factor(recode(FIN_TYP,
+                                       `0` = "Endorheic or Glaciated",
+                                       `1` = "Small deltas",
+                                       `2` = "Tidal systems",
+                                       `3` = "Lagoons",
+                                       `4` = "Fjords and fjaerds",
+                                       `5` = "Large rivers",
+                                       `6` = "Karst",
+                                       `7` = "Arheic"))) %>% 
+  separate(Species, into = c("Sp1", "Sp2", "Sp3", "Sp4", "Sp5"), sep = ", ")
+
+# We summarise the complete list of species present in multispecific meadows
+listSpeciesMulti <-  cstocksSpeciesSep %>% 
+  filter(Meadow_type == "multispecific") %>% 
+  select(Sp1:Sp5) %>% 
+  gather(key = "Species", value = "value") %>% 
+  group_by(value) %>% 
+  summarise(n = n()) %>% 
+  filter(!is.na(value))
+
+listSpeciesMulti <- listSpeciesMulti$value
+listSpeciesMulti <- c(listSpeciesMulti, "Amphibolis spp", "Posidonia spp")
+
+# Now we select those cores either from multispecific meadows, or from monospecific meadows, 
+# made up of species that also can occurr in multispecific meadows (e.g. not posidonia oceanica)
+# cstocks_data <- cstocksSpeciesSep %>% 
+#   mutate(Meadow_type = ifelse(Sp1 %in% listSpeciesMulti & !is.na(Sp2), "Multispecific",
+#                               ifelse(Sp1 %in% listSpeciesMulti, "Monospecific", "Exclusively\nmonospecific"))) %>%  
+#   select(CoreID_unique, Meadow_type, Latitude, FIN_TYP_names, Nearest_distance, Lat_Zone, Lat_Zone_Posi, Source, depth, cstocks) %>% 
+#   # select(Meadow_type, depth, Source, cstocks) %>% 
+#   filter_all(all_vars(!is.na(.)))  
+cstocks_data <- cstocks_tidy20Stocks %>% 
+  mutate(Lat_Zone_Posi = ifelse(Posi == "Posi", "Posi", Lat_Zone),
+         Lat_Zone = factor(Lat_Zone),
+         # CoreID_unique = factor(CoreID_unique),
+         FIN_TYP_names = factor(recode(FIN_TYP,
+                                       `0` = "Endorheic or Glaciated",
+                                       `1` = "Small deltas",
+                                       `2` = "Tidal systems",
+                                       `3` = "Lagoons",
+                                       `4` = "Fjords and fjaerds",
+                                       `5` = "Large rivers",
+                                       `6` = "Karst",
+                                       `7` = "Arheic"))) %>% 
+  mutate(Meadow_type2 = if_else(Posi == "Posi", "P. oceanica", as.character(Meadow_type))) %>% 
+  mutate(Meadow_type = as.factor(Meadow_type2)) %>% 
+  # filter(Species != "Posidonia oceanica") %>% # To check the effect of Species without Posidonia oceanica
+  # select(Latitude, Species, Source, depth, cstocks, CoreID_unique) %>% 
+  select(CoreID_unique, Meadow_type, Latitude, FIN_TYP_names, Nearest_distance, Lat_Zone, Lat_Zone_Posi, Source, depth, cstocks) %>% 
+  filter_all(all_vars(!is.na(.)))  
+
+# To remove typologies that do not have multispecific meadows (e.g. polar zones)
+cstocks_data$FIN_TYP_names <- droplevels(cstocks_data$FIN_TYP_names)
+
+# In these models where we include meadow_type, I won't be including Lat_Zone_Posi, because they're collinear.
+
+# Full linear model
+m0 <- lm(log(cstocks) ~ Meadow_type + depth + FIN_TYP_names, data = cstocks_data)
+step(m0) # Apparently, Meadow_type, FIN_TYP_names will be important.
+
+# Do we need weights?
+m0.gls <- gls(log(cstocks) ~ Meadow_type + depth + FIN_TYP_names, data = cstocks_data)
+m0.gls.w <- gls(log(cstocks) ~ Meadow_type + depth + FIN_TYP_names, 
+                weights = varIdent(form = ~1|FIN_TYP_names), 
+                data = cstocks_data)
+anova(m0.gls, m0.gls.w) # Best with FIN_TYP_names weights.
+
+m0.gls.w2 <- gls(log(cstocks) ~ Meadow_type + depth + FIN_TYP_names, 
+                 weights = varIdent(form = ~1|Meadow_type), 
+                 data = cstocks_data)
+anova(m0.gls, m0.gls.w2) # Best WITH Meadow_type weights.
+
+m0.gls.w3 <- gls(log(cstocks) ~ Meadow_type + depth + FIN_TYP_names, 
+                 weights = varIdent(form = ~1|FIN_TYP_names*Meadow_type), 
+                 data = cstocks_data)
+anova(m0.gls.w2, m0.gls.w3) # Best WITH BOTH
+
+# Do we need random effects?
+m0.lme <- lme(log(cstocks) ~ Meadow_type + depth + FIN_TYP_names, 
+              random = ~1|Source,
+              weights = varIdent(form = ~1|FIN_TYP_names*Meadow_type), 
+              control = lmeControl(maxIter = 100, msMaxIter = 100),
+              data = cstocks_data)
+anova(m0.gls.w3, m0.lme) # The random effect Source is needed
+
+m1.lme <- lme(log(cstocks) ~ Meadow_type + depth + FIN_TYP_names, 
+              random = ~1|CoreID_unique,
+              weights = varIdent(form = ~1|FIN_TYP_names*Meadow_type), 
+              control = lmeControl(maxIter = 100, msMaxIter = 100),
+              data = cstocks_data)
+anova(m0.gls.w3, m1.lme) # The random effect CoreID_unique is needed
+
+m2.lme <- lme(log(cstocks) ~ Meadow_type + depth + FIN_TYP_names, 
+              random = ~1|Source/CoreID_unique,
+              weights = varIdent(form = ~1|FIN_TYP_names*Meadow_type), 
+              control = lmeControl(maxIter = 100, msMaxIter = 100),
+              data = cstocks_data)
+
+AIC(m0.lme, m1.lme, m2.lme)
+anova(m1.lme, m2.lme) # Clearly, the model with CoreID_unique nested in Source is better.
+
+mfinal <- lme(log(cstocks) ~ Meadow_type + depth + FIN_TYP_names, 
+              random = ~1|Source/CoreID_unique,
+              weights = varIdent(form = ~1|FIN_TYP_names*Meadow_type), 
+              control = lmeControl(maxIter = 100, msMaxIter = 100),
+              data = cstocks_data)
+Anova(mfinal)
+# Analysis of Deviance Table (Type II tests)
+# 
+# Response: log(cstocks)
+#                 Chisq Df Pr(>Chisq)    
+# Meadow_type   9.3578e+01  2  < 2.2e-16 ***
+# depth         2.4889e+11  1  < 2.2e-16 ***
+# FIN_TYP_names 2.7058e+01  6  0.0001412 ***
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+summary(mfinal)
+
+
+# BUT really, we're not interested in depth and Fin_typ_names. Here we want to focus on meadow-type. Thus, we move them to the random part.
+# To take them into account, but not checking its significance.
+detach("package:nlme", unload=TRUE)
+library(lme4)
+mfinal2 <- lmer(log(cstocks) ~ Meadow_type + (1|Source/CoreID_unique) + (1|depth) + (1|FIN_TYP_names), data = cstocks_data)
+Anova(mfinal2)
+# Analysis of Deviance Table (Type II Wald chisquare tests)
+# 
+# Response: log(cstocks)
+#             Chisq Df Pr(>Chisq)  
+# Meadow_type 94.118  2  < 2.2e-16 ***
+#   ---
+#   Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# Model validation
+mcheck(mfinal2) # OK
+
+
+# Multiple comparisons with library(multcompar)
+# For Meadow_type 
+multcompar_meadowType <- glht(mfinal2, linfct=mcp(Meadow_type="Tukey"))
+summary_multcompar_meadowType <- broom::tidy(summary(multcompar_meadowType))
+letters_multcompar_meadowType <- broom::tidy(cld(multcompar_meadowType))
+# Significant multiple comparisons
+summary_multcompar_meadowType %>%
+  filter(adj.p.value<0.05) %>%
+  print(n = Inf)
+
+
+# # # # # # # # # # # # # # # # # # # # #
+# Plotting MEADOW TYPE EFFECT ----
+# # # # # # # # # # # # # # # # # # # # #
+cstocksFilteredMonoMulti2 <- cstocksSpeciesSep %>% 
+  mutate(Meadow_type2 = if_else(Posi == "Posi", "P. oceanica", as.character(Meadow_type))) %>% 
+  mutate(Meadow_type = as.factor(Meadow_type2)) %>% 
+  filter(!is.na(cstocks)) %>% 
+  group_by(Meadow_type) %>% 
+  summarise(n = n(),
+            mean_stocks = mean(cstocks),
+            error_stocks = std.error(cstocks),
+            max_stocks = max(cstocks)) %>% 
+  left_join(letters_multcompar_meadowType, by = 'Meadow_type')
+
+boxplots <- cstocks_data %>% 
+  ggplot(aes(x = Meadow_type, y = cstocks)) +
+  geom_boxplot(aes(fill = Meadow_type, colour = Meadow_type)) +
+  stat_summary(fun=median, geom="point", shape = 15, size = 0.1) +
+  scale_fill_manual(values = c("#B4DE2CFF", "#1F9E89FF", "#3E4A89FF")) +
+  scale_colour_manual(values = c("#B4DE2CFF", "#1F9E89FF", "#3E4A89FF")) +
+  geom_text(data = cstocksFilteredMonoMulti2, aes(x = Meadow_type, y = max_stocks + 15, label = str_c("(", n, ")"))) +
+  geom_text(data = cstocksFilteredMonoMulti2, aes(x = Meadow_type, y = max_stocks + 35, label = letters)) +
+  # scale_x_discrete(labels = c("Monospecific", "Multispecific")) +
+  xlab("Meadow type") +
+  ylab(bquote(~C[20]~ 'stock (Mg C' ~ha^-1* ')')) +
+  coord_flip() +
+  theme_void() +
+  theme(legend.position = 'none',
+        text = element_text(size=12),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+# ggsave("~/Desktop/meadow_type.pdf", width = 88, height = 82, units = "mm")
+
+# R squared, to report in the paper
+MuMIn::r.squaredGLMM(mfinal2)
+#       R2m       R2c
+# 0.007449527 0.7865999
