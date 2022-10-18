@@ -1,5 +1,5 @@
 # Species Traits and Geomorphic Setting as Drivers of Global Soil Carbon Stocks in Seagrass Meadows
-## Hilary Kennedy, Jordi F. Pagès, David Lagomasino, Ariane Arias-Ortiz, Phil Colarusso, James W. Fourqurean, Michael N. Githaiga, Jason L. Howard, Dorte Krause-Jensen, Tomohiro Kuwae, Paul S. Lavery, Núria Marbà, Peter I. Macreadie, Pere Masqué, Inés Mazarrasa, Toshihiro Miyajima, Óscar Serrano, Carlos M. Duarte
+## H. Kennedy, J. F. Pagès, D. Lagomasino, A. Arias-Ortiz, P. Colarusso, J. W. Fourqurean, M. N. Githaiga, J. L. Howard, D. Krause-Jensen, T. Kuwae, P. S. Lavery, P. I. Macreadie,  N. Marbà, P. Masqué, I. Mazarrasa, T. Miyajima, O. Serrano, and C. M. Duarte
 
 You can find the final open access version of the paper here: https://doi.org/10.1029/2022GB007481
 
